@@ -1,0 +1,85 @@
+import openai
+import networkx as nx
+
+openai.api_key = ENV[‘AUTH_TOKEN’]
+
+class Agent:
+    def __init__(self, name, persona):
+        self.name = name
+        self.persona = persona
+
+    def generate_response(self, prompt):
+        system_prompt = (
+            "You are a Socratic AI assistant that reasons by asking questions to reach deeper understanding. "
+            "You follow Socratic Chain-of-Thought by examining assumptions, alternatives, and implications before answering."
+        )
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"{self.persona}\n\nInput: {prompt}\n\nRespond with your reasoning and then your final answer."}
+                ],
+                temperature=0.7,
+                max_tokens=800
+            )
+            content = response.choices[0].message.content
+        except Exception as e:
+            content = f"[Error in API call: {e}]"
+        return content
+
+class InteractionGraph:
+    def __init__(self):
+        self.graph = nx.DiGraph()
+        self.counter = 0
+
+    def add_interaction(self, agent, prompt, response):
+        node_id = self.counter
+        self.graph.add_node(node_id, agent=agent.name, prompt=prompt, response=response)
+        self.counter += 1
+        return node_id
+
+    def add_edge(self, from_node, to_node):
+        self.graph.add_edge(from_node, to_node)
+
+    def distill(self):
+        conversation = ""
+        for node_id, data in sorted(self.graph.nodes(data=True)):
+            conversation += f"{data['agent']} said: {data['response']}\n\n"
+        summary_prompt = (
+            "You are a Socratic summarizer. Read the multi-agent conversation below and distill it "
+            "into a balanced, rational final answer that reflects the reasoning paths discussed.\n\n" + conversation
+        )
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=[{"role": "system", "content": summary_prompt}]
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"[Error in distillation API call: {e}]"
+
+def main():
+    agent1 = Agent("Agent_A", "You are an expert in Socratic dialogues with philosophical insight.")
+    agent2 = Agent("Agent_B", "You are a critical analyst focused on implications and evidence.")
+    ig = InteractionGraph()
+    seed_question = "Should we allow autonomous AI to make legal decisions without human intervention?"
+    print(f"Seed Question: {seed_question}\n")
+    responseA = agent1.generate_response(seed_question)
+    nodeA = ig.add_interaction(agent1, seed_question, responseA)
+    print(f"{agent1.name} response:\n{responseA}\n{'-'*80}\n")
+    responseB = agent2.generate_response(responseA)
+    nodeB = ig.add_interaction(agent2, responseA, responseB)
+    ig.add_edge(nodeA, nodeB)
+    print(f"{agent2.name} response:\n{responseB}\n{'-'*80}\n")
+    responseA2 = agent1.generate_response(responseB)
+    nodeA2 = ig.add_interaction(agent1, responseB, responseA2)
+    ig.add_edge(nodeB, nodeA2)
+    print(f"{agent1.name} second response:\n{responseA2}\n{'-'*80}\n")
+    print("Distilling the conversation...\n")
+    distilled_summary = ig.distill()
+    print("Distilled Summary:")
+    print(distilled_summary)
+
+if __name__ == "__main__":
+    main()
