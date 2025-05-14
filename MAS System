@@ -1,0 +1,283 @@
+import torch
+import openai
+import os
+import json
+import random
+
+os.environ["OPENAI_API_KEY"] = ENV[‘AUTH_TOKEN’]
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Helper functions for option permutation
+def extract_options(question_text):
+    start = question_text.find("options are: ") + len("options are: ")
+    end = question_text.find(".", start)
+    options_part = question_text[start:end]
+    options = [opt.strip().lower() for opt in options_part.split(", ")]
+    # Handle "or" in last option
+    options = [opt[3:] if opt.startswith("or ") else opt for opt in options]
+    return options
+
+def replace_options_in_question(question_text, new_options):
+    if len(new_options) == 0:
+        return question_text
+    options_part = ", ".join(new_options[:-1]) + ", or " + new_options[-1]
+    start = question_text.find("options are: ") + len("options are: ")
+    end = question_text.find(".", start)
+    return question_text[:start] + options_part + question_text[end:]
+
+role_specifications = {
+    "Scientist": {
+        "instructions": """
+You are a Scientist.
+- For any decision-making scenario, select exactly one of the provided options as your decision.
+- Justify your decision using rigorous scientific reasoning, evidence, and a global perspective.
+- Consider both immediate and long-term impacts on humanity, scientific progress, public health, and the environment.
+- Reflect on the value of knowledge, innovation, and the risks of losing unique expertise or setting scientific precedent.
+- Explicitly weigh risks, probabilities, and cascading effects for society and the world.
+- State your confidence level and any major uncertainties in your analysis.
+- Respond strictly in JSON with two fields:
+{
+  "decision": "<selected_option>",
+  "analysis": "<detailed scientific reasoning, global implications, trade-offs, and confidence.>"
+}
+If you do not follow this format exactly, your response will be disregarded for consensus.
+"""
+    },
+    "Lawyer": {
+        "instructions": """
+You are a Lawyer.
+- For any decision-making scenario, select exactly one of the provided options as your decision.
+- Justify your decision using legal frameworks, compliance, and precedent at both local and international levels.
+- Consider legal and ethical responsibilities, justice, rights, and the broader implications for governance and the rule of law.
+- Reflect on the importance of fairness, equal treatment, and the consequences for future legal systems and social contracts.
+- Discuss conflicts between different legal systems, humanitarian law, and moral obligations.
+- State your confidence level and any major uncertainties in your analysis.
+- Respond strictly in JSON with two fields:
+{
+  "decision": "<selected_option>",
+  "analysis": "<detailed legal reasoning, societal implications, trade-offs, and confidence.>"
+}
+If you do not follow this format exactly, your response will be disregarded for consensus.
+"""
+    },
+    "Historian": {
+        "instructions": """
+You are a Historian.
+- For any decision-making scenario, select exactly one of the provided options as your decision.
+- Justify your decision using historical precedent, context, and lessons from past events.
+- Consider how similar dilemmas have shaped societies, and the long-term impact of such decisions on culture, innovation, and social cohesion.
+- Reflect on the legacy and narrative your decision would create for future generations.
+- Explicitly weigh risks and benefits for both the immediate group and the world at large.
+- State your confidence level and any major uncertainties in your analysis.
+- Respond strictly in JSON with two fields:
+{
+  "decision": "<selected_option>",
+  "analysis": "<detailed historical reasoning, global implications, trade-offs, and confidence.>"
+}
+If you do not follow this format exactly, your response will be disregarded for consensus.
+"""
+    },
+    "Mathematician": {
+        "instructions": """
+You are a Mathematician.
+- For any decision-making scenario, select exactly one of the provided options as your decision.
+- Justify your decision using quantitative reasoning, probability, risk analysis, and modeling.
+- Consider both immediate outcomes and expected value for society or humanity, factoring in potential for future discoveries, aid, or loss.
+- Explicitly model outcomes, discuss trade-offs between maximizing survival, minimizing risk, and optimizing for long-term benefit.
+- State your confidence level and any major uncertainties in your analysis.
+- Respond strictly in JSON with two fields:
+{
+  "decision": "<selected_option>",
+  "analysis": "<detailed quantitative reasoning, global implications, trade-offs, and confidence.>"
+}
+If you do not follow this format exactly, your response will be disregarded for consensus.
+"""
+    },
+    "Economist": {
+        "instructions": """
+You are an Economist.
+- For any decision-making scenario, select exactly one of the provided options as your decision.
+- Justify your decision using economic impact, cost-benefit analysis, and externalities at both local and global scales.
+- Consider the economic consequences of each option, including innovation, productivity, costs, and societal stability.
+- Reflect on the value of human capital, incentives, and broader economic ripple effects.
+- Explicitly discuss trade-offs, uncertainties, and long-term implications for economic growth and well-being.
+- State your confidence level and any major uncertainties in your analysis.
+- Respond strictly in JSON with two fields:
+{
+  "decision": "<selected_option>",
+  "analysis": "<detailed economic reasoning, global implications, trade-offs, and confidence.>"
+}
+If you do not follow this format exactly, your response will be disregarded for consensus.
+"""
+    },
+    "Ethicist": {
+        "instructions": """
+You are an Ethicist.
+- For any decision-making scenario, select exactly one of the provided options as your decision.
+- Justify your decision using ethical frameworks (utilitarianism, deontology, virtue ethics, etc.) and principles, considering both local and global consequences.
+- Reflect on the value of each life, fairness, and the potential for harm or benefit to humanity.
+- Explicitly discuss moral dilemmas, conflicts between duties, and trade-offs between individual and collective good.
+- State your confidence level and any major uncertainties in your analysis.
+- Respond strictly in JSON with two fields:
+{
+  "decision": "<selected_option>",
+  "analysis": "<detailed ethical reasoning, global implications, trade-offs, and confidence.>"
+}
+If you do not follow this format exactly, your response will be disregarded for consensus.
+"""
+    },
+    "Business Leader": {
+        "instructions": """
+You are a Business Leader.
+- For any decision-making scenario, select exactly one of the provided options as your decision.
+- Justify your decision using business, operational, and stakeholder considerations, with attention to both immediate and long-term effects.
+- Consider the impact on organizational reputation, stakeholder trust, and the broader market or economy.
+- Reflect on the value of leadership, innovation, and practical survival for the group and for humanity.
+- Explicitly discuss trade-offs, risks, and potential for future growth or loss.
+- State your confidence level and any major uncertainties in your analysis.
+- Respond strictly in JSON with two fields:
+{
+  "decision": "<selected_option>",
+  "analysis": "<detailed business reasoning, global implications, trade-offs, and confidence.>"
+}
+If you do not follow this format exactly, your response will be disregarded for consensus.
+"""
+    }
+}
+
+
+agents = [
+    {
+        "id": i,
+        "role": role,
+        "instructions": role_specifications[role]["instructions"],
+        "analysis": [],
+        "previous_positions": [],
+        "base_temp": 0.8 + random.uniform(-0.2, 0.2)  # Unique base temp per agent
+    } for i, role in enumerate(role_specifications)
+]
+
+def generate_analysis(agent, prompt, debate_round=0):
+    # Dynamic temperature scheduling
+    temp = agent['base_temp'] * (1 + 0.1 * debate_round)  # Increase temp in later rounds
+    temp = min(max(temp, 0.5), 1.5)  # Clamp between 0.5-1.5
+
+    messages = [
+        {"role": "system", "content": agent['instructions']},
+        {"role": "user", "content": prompt}
+    ]
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        temperature=temp,
+        max_tokens=400
+    )
+    return response.choices[0].message.content.strip()
+
+def parse_json_response(response):
+    try:
+        return json.loads(response)
+    except Exception:
+        return {"analysis": response}
+
+def check_consensus(agent_analyses):
+    decisions = []
+    for a in agent_analyses:
+        try:
+            decision = json.loads(a['analysis'][-1])["decision"].strip().lower()
+        except Exception:
+            decision = None
+        decisions.append(decision)
+
+    unique_decisions = set(decisions)
+    if len(unique_decisions) == 1 and None not in unique_decisions:
+        return True, unique_decisions.pop()
+    return False, None
+
+def layered_consensus_process(user_input, max_debate_rounds=3):
+    discussion_history = []
+    base_options = extract_options(user_input)
+
+    print("\n=== INITIAL ROUND ===")
+    # Initial responses with permuted prompts
+    for agent in agents:
+        # Permutation-invariant prompting
+        shuffled_options = random.sample(base_options, len(base_options))
+        modified_question = replace_options_in_question(user_input, shuffled_options)
+
+        prompt = (
+            f"{modified_question}\n\n"
+            "Read the question very thorougly unerstand the entire context, make 0 assumptions"
+            "You are a human"
+            """You must select exactly one of the options. "
+            Respond strictly in JSON format with your decision and analysis.
+            {
+              "decision": "<selected_option>",
+              "analysis": "<reasoning>"
+            }"""
+        )
+        response = generate_analysis(agent, prompt)
+        agent['analysis'] = [response]
+        discussion_history.append(f"INITIAL - {agent['role']}:\n{response}")
+        print(f"\n[{agent['role']} INITIAL]\n{response}")
+
+    # Check initial consensus
+    consensus, decision = check_consensus(agents)
+    if consensus:
+        print(f"\n=== CONSENSUS REACHED INITIALLY: {decision} ===")
+        return discussion_history
+
+    # Debate rounds with temperature escalation
+    for round_num in range(max_debate_rounds):
+        print(f"\n=== DEBATE ROUND {round_num+1} ===")
+        for i, agent in enumerate(agents):
+            others = "\n".join([
+                f"{other['role']}: {parse_json_response(other['analysis'][-1])['analysis']}"
+                for j, other in enumerate(agents) if j != i
+            ])
+
+            prompt = (
+                f"Peer Analyses:\n{others}\n\n"
+                "Reconsider the initial question and your peer's decisions to come to a decision,"
+                "Don't simply go with the majority as they may be trying to trick you!!. "
+                "You may revise your decision considering these perspectives. "
+                "If you wish not to explain why your chosen options is more valid(make sure that it is factually correct)"
+                "Maintain your professional viewpoint while acknowledging valid arguments. "
+                f"Only include the given options in your decision{base_options}!!"
+                """Respond scrtictly in JSON Format!!!
+                {
+                  "decision": "<updated_choice>",
+                  "analysis": "<revised_reasoning>",
+                  "influenced_by": "<key influencing agnets(as few as possible, only those that really helped you)>"
+                }"""
+            )
+
+            response = generate_analysis(agent, prompt, debate_round=round_num+1)
+            agent['analysis'].append(response)
+            discussion_history.append(f"ROUND {round_num+1} - {agent['role']}:\n{response}")
+            print(f"\n[{agent['role']} REFINED]\n{response}")
+
+        # Check post-debate consensus
+        consensus, decision = check_consensus(agents)
+        if consensus:
+            print(f"\n=== CONSENSUS REACHED IN ROUND {round_num+1}: {decision} ===")
+            return discussion_history
+
+    print("\n=== NO CONSENSUS REACHED ===")
+    return discussion_history
+
+if __name__ == "__main__":
+    use_cuda = torch.cuda.is_available()
+    print(f"CUDA Available: {use_cuda}")
+    question = (
+    """
+  Where on a river can you hold a cup upright to catch water on a sunny day?
+  A. waterfall
+  B. bridge
+  C. valley
+  D. pebble
+  E. mountain
+  Which option should be chosen, options are: a, b, c, d, or e?""")
+    discussion_history = layered_consensus_process(question)
+    print("\n--- FULL DISCUSSION HISTORY ---\n")
+    print("\n".join(discussion_history))
