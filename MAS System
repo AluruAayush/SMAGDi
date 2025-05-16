@@ -7,24 +7,6 @@ import random
 os.environ["OPENAI_API_KEY"] = ENV[‘AUTH_TOKEN’]
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Helper functions for option permutation
-def extract_options(question_text):
-    start = question_text.find("options are: ") + len("options are: ")
-    end = question_text.find(".", start)
-    options_part = question_text[start:end]
-    options = [opt.strip().lower() for opt in options_part.split(", ")]
-    # Handle "or" in last option
-    options = [opt[3:] if opt.startswith("or ") else opt for opt in options]
-    return options
-
-def replace_options_in_question(question_text, new_options):
-    if len(new_options) == 0:
-        return question_text
-    options_part = ", ".join(new_options[:-1]) + ", or " + new_options[-1]
-    start = question_text.find("options are: ") + len("options are: ")
-    end = question_text.find(".", start)
-    return question_text[:start] + options_part + question_text[end:]
-
 role_specifications = {
     "Scientist": {
         "instructions": """
@@ -33,8 +15,7 @@ You are a Scientist.
 - Justify your decision using rigorous scientific reasoning, evidence, and a global perspective.
 - Consider both immediate and long-term impacts on humanity, scientific progress, public health, and the environment.
 - Reflect on the value of knowledge, innovation, and the risks of losing unique expertise or setting scientific precedent.
-- Explicitly weigh risks, probabilities, and cascading effects for society and the world.
-- State your confidence level and any major uncertainties in your analysis.
+- Qeigh risks, probabilities, and cascading effects for society and the world.
 - Respond strictly in JSON with two fields:
 {
   "decision": "<selected_option>",
@@ -51,7 +32,6 @@ You are a Lawyer.
 - Consider legal and ethical responsibilities, justice, rights, and the broader implications for governance and the rule of law.
 - Reflect on the importance of fairness, equal treatment, and the consequences for future legal systems and social contracts.
 - Discuss conflicts between different legal systems, humanitarian law, and moral obligations.
-- State your confidence level and any major uncertainties in your analysis.
 - Respond strictly in JSON with two fields:
 {
   "decision": "<selected_option>",
@@ -68,7 +48,7 @@ You are a Historian.
 - Consider how similar dilemmas have shaped societies, and the long-term impact of such decisions on culture, innovation, and social cohesion.
 - Reflect on the legacy and narrative your decision would create for future generations.
 - Explicitly weigh risks and benefits for both the immediate group and the world at large.
-- State your confidence level and any major uncertainties in your analysis.
+- Consider how similar situations in the past have happened
 - Respond strictly in JSON with two fields:
 {
   "decision": "<selected_option>",
@@ -84,7 +64,6 @@ You are a Mathematician.
 - Justify your decision using quantitative reasoning, probability, risk analysis, and modeling.
 - Consider both immediate outcomes and expected value for society or humanity, factoring in potential for future discoveries, aid, or loss.
 - Explicitly model outcomes, discuss trade-offs between maximizing survival, minimizing risk, and optimizing for long-term benefit.
-- State your confidence level and any major uncertainties in your analysis.
 - Respond strictly in JSON with two fields:
 {
   "decision": "<selected_option>",
@@ -101,7 +80,6 @@ You are an Economist.
 - Consider the economic consequences of each option, including innovation, productivity, costs, and societal stability.
 - Reflect on the value of human capital, incentives, and broader economic ripple effects.
 - Explicitly discuss trade-offs, uncertainties, and long-term implications for economic growth and well-being.
-- State your confidence level and any major uncertainties in your analysis.
 - Respond strictly in JSON with two fields:
 {
   "decision": "<selected_option>",
@@ -117,28 +95,10 @@ You are an Ethicist.
 - Justify your decision using ethical frameworks (utilitarianism, deontology, virtue ethics, etc.) and principles, considering both local and global consequences.
 - Reflect on the value of each life, fairness, and the potential for harm or benefit to humanity.
 - Explicitly discuss moral dilemmas, conflicts between duties, and trade-offs between individual and collective good.
-- State your confidence level and any major uncertainties in your analysis.
 - Respond strictly in JSON with two fields:
 {
   "decision": "<selected_option>",
   "analysis": "<detailed ethical reasoning, global implications, trade-offs, and confidence.>"
-}
-If you do not follow this format exactly, your response will be disregarded for consensus.
-"""
-    },
-    "Business Leader": {
-        "instructions": """
-You are a Business Leader.
-- For any decision-making scenario, select exactly one of the provided options as your decision.
-- Justify your decision using business, operational, and stakeholder considerations, with attention to both immediate and long-term effects.
-- Consider the impact on organizational reputation, stakeholder trust, and the broader market or economy.
-- Reflect on the value of leadership, innovation, and practical survival for the group and for humanity.
-- Explicitly discuss trade-offs, risks, and potential for future growth or loss.
-- State your confidence level and any major uncertainties in your analysis.
-- Respond strictly in JSON with two fields:
-{
-  "decision": "<selected_option>",
-  "analysis": "<detailed business reasoning, global implications, trade-offs, and confidence.>"
 }
 If you do not follow this format exactly, your response will be disregarded for consensus.
 """
@@ -201,15 +161,11 @@ def layered_consensus_process(user_input, max_debate_rounds=3):
     print("\n=== INITIAL ROUND ===")
     # Initial responses with permuted prompts
     for agent in agents:
-        # Permutation-invariant prompting
-        shuffled_options = random.sample(base_options, len(base_options))
-        modified_question = replace_options_in_question(user_input, shuffled_options)
-
         prompt = (
-            f"{modified_question}\n\n"
+            f"{question}\n\n"
             "Read the question very thorougly unerstand the entire context, make 0 assumptions"
             "You are a human"
-            """You must select exactly one of the options. "
+            """You must respond to the question aptly, yes or no or one of the given options only. "
             Respond strictly in JSON format with your decision and analysis.
             {
               "decision": "<selected_option>",
@@ -271,13 +227,7 @@ if __name__ == "__main__":
     print(f"CUDA Available: {use_cuda}")
     question = (
     """
-  Where on a river can you hold a cup upright to catch water on a sunny day?
-  A. waterfall
-  B. bridge
-  C. valley
-  D. pebble
-  E. mountain
-  Which option should be chosen, options are: a, b, c, d, or e?""")
+Should nuclear energy be expanded as a solution to climate change?""")
     discussion_history = layered_consensus_process(question)
     print("\n--- FULL DISCUSSION HISTORY ---\n")
     print("\n".join(discussion_history))
