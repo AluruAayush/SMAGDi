@@ -823,7 +823,7 @@ def main():
     test_options = [item.get("options", []) for item in test_data]
     
     logger.info("Creating MAG dataset from training data")
-    mag_dataset = create_mag_dataset(test_options, agents, client, test_options)
+    mag_dataset = create_mag_dataset(test_questions, agents, client, test_options)
     
     # Save MAG dataset
     os.makedirs("data", exist_ok=True)
