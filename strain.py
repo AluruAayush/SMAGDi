@@ -25,6 +25,7 @@ from peft import (
 import openai
 
 from smodel import SocraticMAGDi, SocraticMAGDiDataCollator
+from datasets import load_dataset
 
 # Set up logging
 logging.basicConfig(
@@ -785,10 +786,8 @@ def main():
         } for i, role in enumerate(role_specifications)
     ]
     
-    # Load dataset
-    logger.info(f"Loading dataset from {args.dataset_path}")
-    with open(args.dataset_path, 'r') as f:
-        dataset = json.load(f)
+    # Load dataset Put in specific dataset here
+    dataset = load_dataset()
 
     # Split dataset into training and testing sets
     from sklearn.model_selection import train_test_split
