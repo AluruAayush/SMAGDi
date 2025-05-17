@@ -762,9 +762,6 @@ def main():
     args = parser.parse_args()
     set_seed(args.seed)
     
-    args = parser.parse_args()
-    set_seed(args.seed)
-    
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
