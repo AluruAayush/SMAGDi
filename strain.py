@@ -755,6 +755,11 @@ def main():
                         help="Random seed")
     parser.add_argument("--use_lora", action="store_true", 
                         help="Whether to use LoRA for parameter-efficient fine-tuning")
+    parser.add_argument("--train_ratio", type=float, default=0.5, 
+                    help="Ratio of data to use for training (default: 0.5)")
+    
+    args = parser.parse_args()
+    set_seed(args.seed)
     
     args = parser.parse_args()
     set_seed(args.seed)
@@ -784,25 +789,41 @@ def main():
     logger.info(f"Loading dataset from {args.dataset_path}")
     with open(args.dataset_path, 'r') as f:
         dataset = json.load(f)
+
+    # Split dataset into training and testing sets
+    from sklearn.model_selection import train_test_split
+    train_data, test_data = train_test_split(
+        dataset, 
+        test_size=1-args.train_ratio, 
+        random_state=args.seed
+    )
+    
+    logger.info(f"Split dataset: {len(train_data)} training examples, {len(test_data)} testing examples")
+    
+    # Save test data for later evaluation
+    with open(os.path.join(args.output_dir, "test_data.json"), "w") as f:
+        json.dump(test_data, f)
+    logger.info(f"Saved test data to {os.path.join(args.output_dir, 'test_data.json')}")
     
     # Extract questions and answers for agent training
-    training_data = []
-    for item in dataset:
-        training_data.append({
+    training_examples = []
+    for item in train_data:
+        training_examples.append({
             "question": item["question"],
             "answer": item["answer"],
             "options": item.get("options", [])
         })
     
-    # Train agent weights
-    agents = train_agent_weights(agents, training_data, client)
+    # Train agent weights using only the training data
+    logger.info("Training agent weights using training data")
+    agents = train_agent_weights(agents, training_examples, client)
     
-    # Create MAG dataset
-    questions = [item["question"] for item in dataset]
-    options = [item.get("options", []) for item in dataset]
+    # Create MAG dataset from the training data
+    test_questions = [item["question"] for item in test_data]
+    test_options = [item.get("options", []) for item in test_data]
     
-    logger.info("Creating MAG dataset")
-    mag_dataset = create_mag_dataset(questions, agents, client, options)
+    logger.info("Creating MAG dataset from training data")
+    mag_dataset = create_mag_dataset(test_options, agents, client, test_options)
     
     # Save MAG dataset
     os.makedirs("data", exist_ok=True)
@@ -811,6 +832,7 @@ def main():
     
     logger.info(f"Created MAG dataset with {len(mag_dataset)} examples")
     
+    # Continue with the rest of the training process...
     # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.decomposer_model)
     tokenizer.pad_token = tokenizer.eos_token
