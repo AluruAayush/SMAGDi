@@ -9,6 +9,7 @@ from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM
 )
+from dataset import dataset_loader
 
 # Set up logging
 logging.basicConfig(
@@ -214,10 +215,8 @@ def main():
     
     args = parser.parse_args()
     
-    # Load test data
-    logger.info(f"Loading test data from {args.test_file}")
-    with open(args.test_file, "r") as f:
-        test_data = json.load(f)
+    # Load test data here
+    test_data = dataset_loader("")
     
     # Load models and tokenizers
     logger.info("Loading decomposer model and tokenizer")
