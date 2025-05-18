@@ -233,7 +233,7 @@ def train_agent_weights(agents, training_data, client):
     # Evaluate each agent on training data
     for item in tqdm(training_data, desc="Training agents"):
         question = item['question']
-        correct_answer = item['answer'].strip().lower()
+        correct_answer = item['answerKey'].strip().lower()
         options = item.get('options', [])
         
         base_options = ""
