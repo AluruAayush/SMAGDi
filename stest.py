@@ -9,7 +9,7 @@ from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM
 )
-from dataset import load_dataset
+from datasets import load_dataset
 import time
 
 # Set up logging
