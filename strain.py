@@ -784,7 +784,8 @@ def main():
     ]
     
     # Load dataset Put in specific dataset here
-    dataset = load_dataset()
+    dataset = load_dataset("commonsense_qa")
+    dataset = dataset["train"].train_test_split(test_size=0.8, seed=42)
 
     # Split dataset into training and testing sets
     from sklearn.model_selection import train_test_split
