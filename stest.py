@@ -10,6 +10,7 @@ from transformers import (
     AutoModelForCausalLM
 )
 from dataset import load_dataset
+import time
 
 # Set up logging
 logging.basicConfig(
