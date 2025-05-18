@@ -244,7 +244,7 @@ def main():
     
     for example in tqdm(test_data, desc="Inferencing"):
         question = example["question"]
-        reference = example["answer"]
+        reference = example["answerKey"]
         
         # Perform Socratic inference
         start = time.time()
