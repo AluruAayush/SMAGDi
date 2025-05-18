@@ -240,12 +240,14 @@ def main():
     results = []
     predictions = []
     references = []
+    per_example_times = []
     
-    for example in tqdm(test_data):
+    for example in tqdm(test_data, desc="Inferencing"):
         question = example["question"]
         reference = example["answer"]
         
         # Perform Socratic inference
+        start = time.time()
         result = socratic_inference(
             question, 
             decomposer, 
@@ -254,6 +256,10 @@ def main():
             tokenizer_solver, 
             args
         )
+        elapsed = time.time()-start
+        per_example_times.append(elapsed)
+
+        result["time_taken"] = elapsed
         
         results.append({
             "question": question,
@@ -262,19 +268,29 @@ def main():
             "sub_questions": result["sub_questions"],
             "sub_answers": result["sub_answers"],
             "final_answer": result["final_answer"]
+            "time_taken": elapsed
         })
         
         predictions.append(result["extracted_answer"])
         references.append(reference)
-    
+
+    total_time = sum(per_example_times)
+    avg_time = total_time / len(per_example_times)
     # Calculate accuracy
     accuracy = evaluate_accuracy(args.dataset_type, predictions, references)
     logger.info(f"Overall accuracy: {accuracy:.4f}")
+    logger.info(f"Avg time per example: {avg_time:.3f}s")
+
+    eff = accuracy / avg_time
+
+    logger.ingo(f"Efficiency (acc/sec): {eff:.4f}")
     
     # Save results
     output = {
         "results": results,
         "accuracy": accuracy,
+        "avg_time": avg_time,
+        "efficiency": eff,
         "metadata": {
             "decomposer_model": args.decomposer_model,
             "solver_model": args.solver_model,
@@ -299,6 +315,7 @@ def main():
         logger.info(f"Prediction: {results[i]['prediction']}")
         logger.info(f"Reference: {results[i]['reference']}")
         logger.info("---")
+        
 
 if __name__ == "__main__":
     main()
