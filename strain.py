@@ -783,44 +783,32 @@ def main():
         } for i, role in enumerate(role_specifications)
     ]
     
-    # Load dataset Put in specific dataset here
-    dataset = load_dataset("commonsense_qa")
-    dataset = dataset["train"].train_test_split(train_size=0.8, seed=42)
+    # 1) Load full train
+    full_train = load_dataset("commonsense_qa", split="train")
+    
+    # 3) Split the 80% into two 40% halves
+    subsplits  = full_train.train_test_split(test_size=0.50)
+    agent_data = subsplits["train"]
+    mag_creation_data = subsplits["test"]
+    
+    logger.info(f"Agent weight set: {len(agent_data)} examples")
+    logger.info(f"MAG creation set: {len(mag_creation_data)} examples")
 
-    # Split dataset into training and testing sets
-    from sklearn.model_selection import train_test_split
-    train_data, test_data = train_test_split(
-        dataset, 
-        test_size=1-args.train_ratio, 
-        random_state=args.seed
-    )
-    
-    logger.info(f"Split dataset: {len(train_data)} training examples, {len(test_data)} testing examples")
-    
-    # Save test data for later evaluation
-    with open(os.path.join(args.output_dir, "test_data.json"), "w") as f:
-        json.dump(test_data, f)
-    logger.info(f"Saved test data to {os.path.join(args.output_dir, 'test_data.json')}")
-    
-    # Extract questions and answers for agent training
-    training_examples = []
-    for item in train_data:
-        training_examples.append({
-            "question": item["question"],
-            "answer": item["answer"],
-            "options": item.get("options", [])
-        })
-    
-    # Train agent weights using only the training data
+    # - train agent weights on agent_data -
     logger.info("Training agent weights using training data")
+    training_examples = [
+        {"question": item["question"],
+         "answerKey": item["answerKey"],
+         "options": item.get("options", [])}
+        for item in agent_data
+    ]
     agents = train_agent_weights(agents, training_examples, client)
     
-    # Create MAG dataset from the training data
-    test_questions = [item["question"] for item in test_data]
-    test_options = [item.get("options", []) for item in test_data]
-    
+    # - build MAG dataset on mag_creation_data -
     logger.info("Creating MAG dataset from training data")
-    mag_dataset = create_mag_dataset(test_questions, agents, client, test_options)
+    questions = [item["question"] for item in mag_creation_data]
+    options   = [item.get("options", [])   for item in mag_creation_data]
+    mag_dataset = create_mag_dataset(questions, agents, client, options)
     
     # Save MAG dataset
     os.makedirs("data", exist_ok=True)
