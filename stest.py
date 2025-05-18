@@ -218,7 +218,7 @@ def main():
     
     # Load test data here
     test_data = load_dataset("commonsense_qa")
-    test_data = test_data["test"].train_test_split(test_size=0.2, seed=42)
+    test_data = test_data["test"].train_test_split(test_size=0.2, seed=42)["test"]
     
     # Load models and tokenizers
     logger.info("Loading decomposer model and tokenizer")
@@ -267,7 +267,7 @@ def main():
             "prediction": result["extracted_answer"],
             "sub_questions": result["sub_questions"],
             "sub_answers": result["sub_answers"],
-            "final_answer": result["final_answer"]
+            "final_answer": result["final_answer"],
             "time_taken": elapsed
         })
         
@@ -283,7 +283,7 @@ def main():
 
     eff = accuracy / avg_time
 
-    logger.ingo(f"Efficiency (acc/sec): {eff:.4f}")
+    logger.info(f"Efficiency (acc/sec): {eff:.4f}")
     
     # Save results
     output = {
