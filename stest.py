@@ -216,7 +216,8 @@ def main():
     args = parser.parse_args()
     
     # Load test data here
-    test_data = load_dataset("")
+    test_data = load_dataset("commonsense_qa")
+    test_data = test_data["test"].train_test_split(test_size=0.2, seed=42)
     
     # Load models and tokenizers
     logger.info("Loading decomposer model and tokenizer")
