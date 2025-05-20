@@ -245,11 +245,10 @@ def train_agent_weights(agents, training_data, client):
                 f"{question}{base_options}\n\n"
                 "Read the question thoroughly, understand the entire context, make 0 assumptions. "
                 "You must respond to the question aptly, selecting exactly one of the provided options. "
-                """Respond strictly in JSON format with your decision and analysis.
+                """Respond strictly in JSON format with your decision.
                 {
                   "decision": "<selected_option>",
-                  "analysis": "<reasoning>"
-                }"""
+                  }"""
             )
             
             response = generate_analysis(agent, prompt, client)
