@@ -26,6 +26,7 @@ import openai
 
 from smodel import SocraticMAGDi, SocraticMAGDiDataCollator
 from datasets import load_dataset
+import random
 
 # Set up logging
 logging.basicConfig(
@@ -232,19 +233,19 @@ def train_agent_weights(agents, training_data, client):
     
     # Evaluate each agent on training data
     for item in tqdm(training_data, desc="Training agents"):
+        print(item)
         question = item['question']
+        print(question)
         correct_answer = item['answerKey'].strip().lower()
         options = item.get('options', [])
+        print(options)
         
-        base_options = ""
-        if options:
-            base_options = f"\nOptions: {', '.join(options)}"
-        
+
         for agent in agents:
             prompt = (
-                f"{question}{base_options}\n\n"
+                f"{question}{options}\n\n"
                 "Read the question thoroughly, understand the entire context, make 0 assumptions. "
-                "You must respond to the question aptly, selecting exactly one of the provided options. "
+                "You must respond to the question aptly, selecting exactly one of the provided options(A, B, C, or D). "
                 """Respond strictly in JSON format with your decision.
                 {
                   "decision": "<selected_option>",
@@ -252,6 +253,7 @@ def train_agent_weights(agents, training_data, client):
             )
             
             response = generate_analysis(agent, prompt, client)
+            print(response)
             parsed = parse_json_response(response)
             decision = parsed.get("decision", "").strip().lower()
             
@@ -765,8 +767,9 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Initialize OpenAI client
+    os.environ[
+        "OPENAI_API_KEY"] = ENV[‘AUTH_TOKEN’]
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    
     # Initialize agents
     agents = [
         {
@@ -784,6 +787,7 @@ def main():
     
     # 1) Load full train
     full_train = load_dataset("commonsense_qa", split="train")
+    print(full_train[1])
     
     # 3) Split the 80% into two 40% halves
     subsplits  = full_train.train_test_split(test_size=0.50)
@@ -798,7 +802,7 @@ def main():
     training_examples = [
         {"question": item["question"],
          "answerKey": item["answerKey"],
-         "options": item.get("options", [])}
+         "options": item.get("choices", [])}
         for item in agent_data
     ]
     agents = train_agent_weights(agents, training_examples, client)
