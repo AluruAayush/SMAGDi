@@ -1,7 +1,6 @@
 import os
 import json
 import torch
-import logging
 import argparse
 import numpy as np
 import networkx as nx
@@ -17,11 +16,6 @@ from transformers import (
     TrainingArguments,
     set_seed
 )
-from peft import (
-    LoraConfig,
-    get_peft_model,
-    prepare_model_for_kbit_training
-)
 import openai
 
 from smodel import SocraticMAGDi, SocraticMAGDiDataCollator
@@ -29,14 +23,6 @@ from datasets import load_dataset
 import random
 from collections import Counter
 import re
-
-
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Agent role specifications
 role_specifications = {
@@ -168,7 +154,7 @@ RESPONSE FORMAT(DON'T PUT '''json before this):
   "probability_calculation": "<specific numbers and percentages>",
   "optimization_target": "<what you're maximizing/minimizing>",
   "monte_carlo_results": "<simulation outcomes>",
-  "confidence_intervals": "<uncertainty bounds>
+  "confidence_intervals": "<uncertainty bounds>"
   }
 }
 
@@ -203,7 +189,7 @@ RESPONSE FORMAT(DON'T PUT '''json before this):
   "deontological_analysis": "<duty-based assessment>",
   "virtue_ethics_analysis": "<character-based evaluation>",
   "future_obligations": "<intergenerational ethics>",
-  "legitimacy_assessment": "<decision-maker authority evaluation>
+  "legitimacy_assessment": "<decision-maker authority evaluation>"
   }
 }
 
@@ -213,9 +199,28 @@ Deviation from this format will exclude you from consensus.
 }
 
 
+def get_recommended_model(model_size="small"):
+    """Get recommended models based on size requirements"""
+    models = {
+        "small": {
+            "decomposer": "Qwen/Qwen2-1.5B",
+            "solver": "Qwen/Qwen2-1.5B"
+        },
+        "medium": {
+            "decomposer": "Qwen/Qwen2-7B",
+            "solver": "Qwen/Qwen2-7B"
+        },
+        "large": {
+            "decomposer": "meta-llama/Llama-3.2-3B",
+            "solver": "meta-llama/Llama-3.2-3B"
+        }
+    }
+    return models.get(model_size, models["small"])
+
+
 class MAGDiDataset(Dataset):
     """Dataset for training the SocraticMAGDi model."""
-    
+
     def __init__(self, decomposer_examples, solver_examples, pos_examples, neg_examples, graphs):
         assert len(decomposer_examples) == len(solver_examples) == len(pos_examples) == len(neg_examples) == len(graphs)
         self.decomposer_examples = decomposer_examples
@@ -223,10 +228,10 @@ class MAGDiDataset(Dataset):
         self.pos_examples = pos_examples
         self.neg_examples = neg_examples
         self.graphs = graphs
-    
+
     def __len__(self):
         return len(self.graphs)
-    
+
     def __getitem__(self, idx):
         return {
             "decomposer_input_ids": self.decomposer_examples[idx]["prompt_input_ids"],
@@ -244,9 +249,10 @@ class MAGDiDataset(Dataset):
             "graph": self.graphs[idx]
         }
 
+
 class SocraticMAGDiTrainer(Trainer):
     """Custom trainer for the SocraticMAGDi model."""
-    
+
     def compute_loss(self, model, inputs, return_outputs=False):
         """
         Compute the combined loss for the SocraticMAGDi model.
@@ -266,14 +272,15 @@ class SocraticMAGDiTrainer(Trainer):
             neg_labels=inputs["neg_labels"],
             graph=inputs["graph"]
         )
-        
+
         lm_loss, node_loss, mr_loss, alignment_loss = outputs
         total_loss = lm_loss + node_loss + mr_loss + alignment_loss
-        
+
         if return_outputs:
             return total_loss, outputs
-        
+
         return total_loss
+
 
 def generate_analysis(agent, prompt, client, debate_round=0):
     """Generate analysis from an agent using OpenAI API"""
@@ -283,20 +290,18 @@ def generate_analysis(agent, prompt, client, debate_round=0):
     temp = base_temp * (1 + 0.1 * debate_round)  # Increase temp in later rounds
     temp = min(max(temp, 0.5), 1.5)  # Clamp between 0.5-1.5
 
-    # Or use agent temperature directly without modification:
-    # temp = agent.get('temperature', 0.7)
-
     messages = [
         {"role": "system", "content": agent['instructions']},
         {"role": "user", "content": prompt}
     ]
     response = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-4o-mini",
         messages=messages,
         temperature=temp,
         max_tokens=600
     )
     return response.choices[0].message.content.strip()
+
 
 def parse_json_response(response):
     """Parse JSON response, handling errors gracefully"""
@@ -305,16 +310,17 @@ def parse_json_response(response):
     except Exception:
         return {"analysis": response, "decision": None, "influenced_by": []}
 
+
 def train_agent_weights(agents, training_data, client):
     """Train agent weights based on performance on training data"""
     print("Training agent weights")
-    
+
     # Reset metrics
     for agent in agents:
         agent['accuracy'] = 0.0
         agent['correct_count'] = 0
         agent['total_count'] = 0
-    
+
     # Evaluate each agent on training data
     for item in tqdm(training_data, desc="Training agents"):
         print(item)
@@ -323,22 +329,21 @@ def train_agent_weights(agents, training_data, client):
         correct_answer = str(item['answerKey'])
         options = item.get('options', [])
         print(options)
-        
 
         for agent in agents:
             prompt = (
-            f"<System Protocol>DO NOT INCLUDE REASONING IN OUTPUT</System>\n\n"
-            f"{question}{options}\n\n"
-            f"<Analysis Steps (INTERNAL USE ONLY)>\n"
-            f"1. Surface assumptions → 2. Verify facts → 3. Generate alternatives → 4. Validate\n\n"
-            f"<Output Requirements>\n"
-            f"- Start with '{{' and end with '}}'\n"
-            f"- No surrounding text or analysis steps\n\n"
-            f"{agent['instructions']}\n\n"
-            f"<BAD Example>DO NOT OUTPUT LIKE THIS:\n"
-            f"'First, I considered...' {{\"decision\":...}}\n"
+                f"<System Protocol>DO NOT INCLUDE REASONING IN OUTPUT</System>\n\n"
+                f"{question}{options}\n\n"
+                f"<Analysis Steps (INTERNAL USE ONLY)>\n"
+                f"1. Surface assumptions → 2. Verify facts → 3. Generate alternatives → 4. Validate\n\n"
+                f"<Output Requirements>\n"
+                f"- Start with '{{' and end with '}}'\n"
+                f"- No surrounding text or analysis steps\n\n"
+                f"{agent['instructions']}\n\n"
+                f"<BAD Example>DO NOT OUTPUT LIKE THIS:\n"
+                f"'First, I considered...' {{\"decision\":...}}\n"
             )
-            
+
             response = generate_analysis(agent, prompt, client)
             print(response)
             parsed = parse_json_response(response)
@@ -350,7 +355,7 @@ def train_agent_weights(agents, training_data, client):
             print(correct_answer)
             if decision == correct_answer:
                 agent['correct_count'] += 1
-    
+
     # Calculate final accuracy and weights
     total_accuracy = 0
     for agent in agents:
@@ -358,11 +363,11 @@ def train_agent_weights(agents, training_data, client):
             agent['accuracy'] = agent['correct_count'] / agent['total_count']
         else:
             agent['accuracy'] = 0
-        
+
         # Ensure minimum weight of 0.1 to prevent complete exclusion
         agent['weight'] = max(0.1, agent['accuracy'])
         total_accuracy += agent['accuracy']
-    
+
     # Normalize weights if we have any accuracy
     if total_accuracy > 0:
         weight_sum = sum(agent['weight'] for agent in agents)
@@ -372,26 +377,27 @@ def train_agent_weights(agents, training_data, client):
         # Equal weights if no accuracy data
         for agent in agents:
             agent['weight'] = 1.0 / len(agents)
-    
+
     # Print results
     print("Agent Training Results:")
     for agent in agents:
         print(f"{agent['role']}: Accuracy = {agent['accuracy']:.4f}, Weight = {agent['weight']:.4f}")
-    
+
     return agents
+
 
 def track_influence(agents):
     """Track which agents influenced others based on the 'influenced_by' field"""
     influence_counts = {agent['id']: 0 for agent in agents}
-    
+
     for agent in agents:
         if len(agent['analysis']) < 2:
             continue
-        
+
         try:
             parsed = parse_json_response(agent['analysis'][-1])
             influenced_by = parsed.get("influenced_by", "")
-            
+
             # Parse influenced_by field
             if isinstance(influenced_by, str):
                 # Look for role names in the string
@@ -405,15 +411,16 @@ def track_influence(agents):
                             influence_counts[other_agent['id']] += 1
         except Exception:
             continue
-    
+
     # Update influence scores
     total_influences = sum(influence_counts.values()) or 1  # Avoid division by zero
     for agent in agents:
         agent['influence_score'] = influence_counts[agent['id']] / total_influences
-    
+
     return influence_counts
 
-def create_debate_graph(agents, question, gold_answer=None, decision=None, is_correct = None):
+
+def create_debate_graph(agents, question, gold_answer=None, decision=None, is_correct=None):
     """
     Create a debate graph (MAG) with ground truth and correctness annotations.
     Each response node records if its decision matches the gold answer.
@@ -421,7 +428,7 @@ def create_debate_graph(agents, question, gold_answer=None, decision=None, is_co
     G = nx.DiGraph()
 
     # 1. Add question node
-    G.add_node("question", content=question, type="question", round=-1)  # debate graph structure[1]
+    G.add_node("question", content=question, type="question", round=-1)
 
     # 2. Add ground truth node and link it to the question
     if gold_answer is not None:
@@ -476,14 +483,14 @@ def create_debate_graph(agents, question, gold_answer=None, decision=None, is_co
                                 other_prev,
                                 node_id,
                                 type="influences",
-                                weight=other.get("weight", 0.0)  # use trained agent weights[2]
+                                weight=other.get("weight", 0.0)
                             )
     return G
 
 
 def has_consensus(agents):
     """
-    Returns (True, decision) if every agent’s last decision matches,
+    Returns (True, decision) if every agent's last decision matches,
     else (False, None). Handles missing or malformed JSON.
     """
     decisions = []
@@ -510,13 +517,15 @@ def has_consensus(agents):
     if len(counts) == 1:
         return True, decisions[0]
     return False, None
+
+
 def layered_consensus_process(
-    question,
-    agents,
-    client,
-    base_options="",
-    max_debate_rounds=2,
-    gold_answer=None
+        question,
+        agents,
+        client,
+        base_options="",
+        max_debate_rounds=2,
+        gold_answer=None
 ):
     """Run the multi-agent debate process with weighted consensus and ground truth comparison"""
     discussion_history = []
@@ -555,7 +564,6 @@ def layered_consensus_process(
         discussion_history.append(f"CONSENSUS_CORRECT: {is_correct}")
         return discussion_history, create_debate_graph(agents, question, gold_answer, decision, is_correct)
 
-    # Debate rounds with temperature escalation
     # Debate rounds with temperature escalation
     for round_num in range(2):
         print(f"=== DEBATE ROUND {round_num + 1} ===")
@@ -597,7 +605,7 @@ def layered_consensus_process(
                 "   c. **Example Enforcement**:\n"
                 "      GOOD: \"influenced_by\": [\"Mathematician\", \"Ethicist\"]\n"
                 "      BAD: \"influenced_by\": [] or missing field → REJECTED\n\n"
-                
+
                 "Answer As Follows:"
                 "Response Requirements:\n"
                 "- Use YOUR SPECIFIED RESPONSE FORMAT\n"
@@ -615,7 +623,7 @@ def layered_consensus_process(
 
         # Track influence after each round
         influence_counts = track_influence(agents)
-        print(f"Influence counts after round {round_num+1}: {influence_counts}")
+        print(f"Influence counts after round {round_num + 1}: {influence_counts}")
         consensus, decision = has_consensus(agents)
         if consensus:
             print(f"Consensus reached on '{decision}' at round {round_num + 1}")
@@ -633,7 +641,7 @@ def layered_consensus_process(
 
     if vote_totals:
         final_decision, total = max(vote_totals.items(), key=lambda x: x[1])
-        logger.info(f"Weighted vote selects '{final_decision}' ({total:.2f} total weight)")
+        print(f"Weighted vote selects '{final_decision}' ({total:.2f} total weight)")
         discussion_history.append(f"WEIGHTED_VOTE: {final_decision}")
         is_correct = (final_decision == gold_answer.strip().lower()) if gold_answer else None
         discussion_history.append(f"WEIGHTED_VOTE_CORRECT: {is_correct}")
@@ -643,12 +651,13 @@ def layered_consensus_process(
 
     return discussion_history, create_debate_graph(agents, question, gold_answer, final_decision, is_correct)
 
+
 def extract_node_embeddings(graph, model_name="sentence-transformers/all-mpnet-base-v2"):
     """Extract embeddings for graph nodes using a pretrained model"""
     try:
         from sentence_transformers import SentenceTransformer
         model = SentenceTransformer(model_name)
-        
+
         embeddings = {}
         for node_id in graph.nodes():
             content = graph.nodes[node_id].get('content', '')
@@ -657,16 +666,17 @@ def extract_node_embeddings(graph, model_name="sentence-transformers/all-mpnet-b
             else:
                 # Default embedding for nodes without content
                 embeddings[node_id] = np.zeros(model.get_sentence_embedding_dimension())
-        
+
         return embeddings
     except ImportError:
-        logger.warning("sentence-transformers not installed. Using random embeddings.")
+        print("Warning: sentence-transformers not installed. Using random embeddings.")
         # Fallback to random embeddings
         dim = 768  # Default embedding dimension
         embeddings = {}
         for node_id in graph.nodes():
             embeddings[node_id] = np.random.normal(0, 0.1, dim)
         return embeddings
+
 
 def convert_to_pyg_data(graph, embeddings):
     """
@@ -694,7 +704,8 @@ def convert_to_pyg_data(graph, embeddings):
             edge_index.append([node_list.index(src), node_list.index(dst)])
             edge_attr.append([data.get('weight', 1.0)])  # Default weight is 1.0
 
-    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous() if edge_index else torch.empty((2, 0), dtype=torch.long)
+    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous() if edge_index else torch.empty((2, 0),
+                                                                                                            dtype=torch.long)
     edge_attr = torch.tensor(edge_attr, dtype=torch.float) if edge_attr else None
 
     # Labels: 1 if node's decision matches gold, else 0
@@ -707,11 +718,12 @@ def convert_to_pyg_data(graph, embeddings):
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
     return data
 
+
 def create_mag_dataset(training_data, agents, client):
     """Create a MAG dataset from multiple questions"""
     mag_dataset = []
 
-    for item in tqdm(training_data, desc="Training agents"):
+    for item in tqdm(training_data, desc="Creating MAG dataset"):
         print(item)
         question = item['question']
         print(question)
@@ -719,13 +731,13 @@ def create_mag_dataset(training_data, agents, client):
         print(options)
         gold_answer = item.get('gold_answer', [])
         _, debate_graph = layered_consensus_process(question, agents, client, options, gold_answer)
-        
+
         # Extract embeddings
         embeddings = extract_node_embeddings(debate_graph)
-        
+
         # Convert to PyG Data
         pyg_data = convert_to_pyg_data(debate_graph, embeddings)
-        
+
         # Add to dataset
         mag_dataset.append({
             "question": question,
@@ -733,35 +745,36 @@ def create_mag_dataset(training_data, agents, client):
             "graph": debate_graph,
             "pyg_data": pyg_data
         })
-    
+
     return mag_dataset
+
 
 def prepare_socratic_examples(mag_dataset, tokenizer):
     """Prepare examples for training the Socratic model components"""
     decomposer_examples = []
     solver_examples = []
-    
+
     for item in mag_dataset:
         question = item["question"]
         graph = item["graph"]
-        
+
         # Extract sub-questions (nodes with highest influence)
         sub_questions = []
         for node, data in graph.nodes(data=True):
             if data.get('type') == 'response' and graph.in_degree(node) > 1:
                 # Nodes with multiple incoming edges are influential
                 sub_questions.append(data.get('content', ''))
-        
+
         if sub_questions:
             # Create decomposer example
             decomposer_prompt = f"Question: {question}\nBreak this down into sub-questions:"
             decomposer_completion = "\n".join([f"- {sq[:100]}..." for sq in sub_questions[:3]])
-            
+
             decomposer_examples.append({
                 "prompt": decomposer_prompt,
                 "completion": decomposer_completion
             })
-        
+
         # Find sub-question answers (solver examples)
         for node, data in graph.nodes(data=True):
             if data.get('type') == 'response' and data.get('round', 0) > 0:
@@ -770,18 +783,18 @@ def prepare_socratic_examples(mag_dataset, tokenizer):
                 for pred in graph.predecessors(node):
                     if graph.nodes[pred].get('type') == 'response':
                         influencers.append(pred)
-                
+
                 if influencers:
                     # Create solver example
                     influencer_content = graph.nodes[influencers[0]].get('content', '')
                     solver_prompt = f"Question: {influencer_content[:100]}..."
                     solver_completion = data.get('content', '')
-                    
+
                     solver_examples.append({
                         "prompt": solver_prompt,
                         "completion": solver_completion
                     })
-    
+
     # Tokenize examples
     tokenized_decomposer = []
     for ex in decomposer_examples:
@@ -792,7 +805,7 @@ def prepare_socratic_examples(mag_dataset, tokenizer):
             padding="max_length",
             return_tensors="pt"
         )
-        
+
         completion_tokens = tokenizer(
             ex["completion"],
             truncation=True,
@@ -800,14 +813,14 @@ def prepare_socratic_examples(mag_dataset, tokenizer):
             padding="max_length",
             return_tensors="pt"
         )
-        
+
         tokenized_decomposer.append({
             "prompt_input_ids": prompt_tokens.input_ids[0],
             "prompt_attention_mask": prompt_tokens.attention_mask[0],
             "completion_input_ids": completion_tokens.input_ids[0],
             "completion_attention_mask": completion_tokens.attention_mask[0]
         })
-    
+
     tokenized_solver = []
     for ex in solver_examples:
         prompt_tokens = tokenizer(
@@ -817,7 +830,7 @@ def prepare_socratic_examples(mag_dataset, tokenizer):
             padding="max_length",
             return_tensors="pt"
         )
-        
+
         completion_tokens = tokenizer(
             ex["completion"],
             truncation=True,
@@ -825,44 +838,45 @@ def prepare_socratic_examples(mag_dataset, tokenizer):
             padding="max_length",
             return_tensors="pt"
         )
-        
+
         tokenized_solver.append({
             "prompt_input_ids": prompt_tokens.input_ids[0],
             "prompt_attention_mask": prompt_tokens.attention_mask[0],
             "completion_input_ids": completion_tokens.input_ids[0],
             "completion_attention_mask": completion_tokens.attention_mask[0]
         })
-    
+
     return tokenized_decomposer, tokenized_solver
+
 
 def prepare_pos_neg_examples(mag_dataset, tokenizer):
     """Prepare positive and negative examples for contrastive learning"""
     pos_examples = []
     neg_examples = []
-    
+
     for item in mag_dataset:
         question = item["question"]
         graph = item["graph"]
-        
+
         # Find nodes with high and low influence
         node_influence = {}
         for node in graph.nodes():
             # Measure influence by out-degree (how many nodes it influences)
             node_influence[node] = graph.out_degree(node)
-        
+
         # Sort nodes by influence
         sorted_nodes = sorted(node_influence.items(), key=lambda x: x[1], reverse=True)
-        
+
         # Get positive examples (high influence) and negative examples (low influence)
-        pos_nodes = [node for node, _ in sorted_nodes[:len(sorted_nodes)//3]]
-        neg_nodes = [node for node, _ in sorted_nodes[-len(sorted_nodes)//3:]]
-        
+        pos_nodes = [node for node, _ in sorted_nodes[:len(sorted_nodes) // 3]]
+        neg_nodes = [node for node, _ in sorted_nodes[-len(sorted_nodes) // 3:]]
+
         # Create examples
         for pos_node in pos_nodes:
             if 'content' in graph.nodes[pos_node]:
                 pos_prompt = f"Question: {question}"
                 pos_completion = graph.nodes[pos_node]['content']
-                
+
                 pos_tokens = tokenizer(
                     pos_prompt,
                     pos_completion,
@@ -871,18 +885,18 @@ def prepare_pos_neg_examples(mag_dataset, tokenizer):
                     padding="max_length",
                     return_tensors="pt"
                 )
-                
+
                 pos_examples.append({
                     "input_ids": pos_tokens.input_ids[0],
                     "attention_mask": pos_tokens.attention_mask[0],
                     "labels": pos_tokens.input_ids[0].clone()
                 })
-        
+
         for neg_node in neg_nodes:
             if 'content' in graph.nodes[neg_node]:
                 neg_prompt = f"Question: {question}"
                 neg_completion = graph.nodes[neg_node]['content']
-                
+
                 neg_tokens = tokenizer(
                     neg_prompt,
                     neg_completion,
@@ -891,68 +905,81 @@ def prepare_pos_neg_examples(mag_dataset, tokenizer):
                     padding="max_length",
                     return_tensors="pt"
                 )
-                
+
                 neg_examples.append({
                     "input_ids": neg_tokens.input_ids[0],
                     "attention_mask": neg_tokens.attention_mask[0],
                     "labels": neg_tokens.input_ids[0].clone()
                 })
-    
+
     return pos_examples, neg_examples
+
 
 def main():
     parser = argparse.ArgumentParser(description="Train a SocraticMAGDi model")
-    
-    # Model configuration
-    parser.add_argument("--decomposer_model", type=str, default="gpt2", 
+
+    # Model configuration with improved defaults
+    parser.add_argument("--decomposer_model", type=str, default="Qwen/Qwen2-1.5B",
                         help="Model name for the decomposer")
-    parser.add_argument("--solver_model", type=str, default="gpt2", 
+    parser.add_argument("--solver_model", type=str, default="Qwen/Qwen2-1.5B",
                         help="Model name for the solver")
-    parser.add_argument("--gcn_in_channels", type=int, default=768, 
+    parser.add_argument("--model_size", type=str, default="small",
+                        choices=["small", "medium", "large"],
+                        help="Size of base models to use")
+    parser.add_argument("--gcn_in_channels", type=int, default=768,
                         help="Input dimension for GCN")
-    parser.add_argument("--gcn_hidden_channels", type=int, default=256, 
+    parser.add_argument("--gcn_hidden_channels", type=int, default=256,
                         help="Hidden dimension for GCN")
-    parser.add_argument("--gcn_out_channels", type=int, default=4, 
+    parser.add_argument("--gcn_out_channels", type=int, default=4,
                         help="Output dimension for GCN (number of node classes)")
-    
+
     # Loss weights
-    parser.add_argument("--alpha", type=float, default=1.0, 
+    parser.add_argument("--alpha", type=float, default=1.0,
                         help="Weight for language modeling loss")
-    parser.add_argument("--beta", type=float, default=1.0, 
+    parser.add_argument("--beta", type=float, default=1.0,
                         help="Weight for node classification loss")
-    parser.add_argument("--gamma", type=float, default=0.1, 
+    parser.add_argument("--gamma", type=float, default=0.1,
                         help="Weight for contrastive loss")
-    parser.add_argument("--delta", type=float, default=0.5, 
+    parser.add_argument("--delta", type=float, default=0.5,
                         help="Weight for decomposer-solver alignment loss")
-    
+
     # Training configuration
-    parser.add_argument("--dataset_path", type=str, default="data/dataset.json", 
+    parser.add_argument("--dataset_path", type=str, default="data/dataset.json",
                         help="Path to dataset file")
-    parser.add_argument("--output_dir", type=str, default="outputs", 
+    parser.add_argument("--output_dir", type=str, default="outputs",
                         help="Output directory for model checkpoints")
-    parser.add_argument("--batch_size", type=int, default=4, 
+    parser.add_argument("--batch_size", type=int, default=4,
                         help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=5, 
+    parser.add_argument("--num_epochs", type=int, default=5,
                         help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=5e-5, 
+    parser.add_argument("--learning_rate", type=float, default=5e-5,
                         help="Learning rate")
-    parser.add_argument("--seed", type=int, default=42, 
+    parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
-    parser.add_argument("--use_lora", action="store_true", 
-                        help="Whether to use LoRA for parameter-efficient fine-tuning")
-    parser.add_argument("--train_ratio", type=float, default=0.5, 
-                    help="Ratio of data to use for training (default: 0.5)")
-    
+    parser.add_argument("--train_ratio", type=float, default=0.5,
+                        help="Ratio of data to use for training (default: 0.5)")
+
     args = parser.parse_args()
     set_seed(args.seed)
-    
+
+    # Update model selection based on size
+    recommended_models = get_recommended_model(args.model_size)
+    if args.decomposer_model == "Qwen/Qwen2-1.5B" and args.model_size != "small":  # If using default
+        args.decomposer_model = recommended_models["decomposer"]
+    if args.solver_model == "Qwen/Qwen2-1.5B" and args.model_size != "small":  # If using default
+        args.solver_model = recommended_models["solver"]
+
+    print(f"Using decomposer model: {args.decomposer_model}")
+    print(f"Using solver model: {args.solver_model}")
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     # Initialize OpenAI client
     os.environ[
         "OPENAI_API_KEY"] = ENV[‘AUTH_TOKEN’]
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
     # Initialize agents
     agents = [
         {
@@ -967,13 +994,14 @@ def main():
             "influence_score": 0.0  # Will track how often this agent influences others
         } for i, role in enumerate(role_specifications)
     ]
-    
-    # 1) Load full train
+
+    # Load dataset
     full_train = load_dataset("wics/strategy-qa", split="test")
     print(full_train[1])
-    full_train = full_train.train_test_split(test_size=0.20, seed = 41)
-    # 3) Split the 80% into two 40% halves
-    subsplits  = full_train["train"].train_test_split(test_size=0.50)
+    full_train = full_train.train_test_split(test_size=0.20, seed=41)
+
+    # Split the 80% into two 40% halves
+    subsplits = full_train["train"].train_test_split(test_size=0.50)
     agent_data = subsplits["train"]
     print(agent_data)
     mag_creation_data = subsplits["test"].select(range(1))
@@ -981,7 +1009,7 @@ def main():
     print(f"Agent weight set: {len(agent_data)} examples")
     print(f"MAG creation set: {len(mag_creation_data)} examples")
 
-    # - train agent weights on agent_data -
+    # Train agent weights on agent_data
     print("Training agent weights using training data")
     training_examples = [
         {"question": item["question"],
@@ -991,7 +1019,7 @@ def main():
     ]
     agents = train_agent_weights(agents, training_examples, client)
 
-    # - build MAG dataset on mag_creation_data -
+    # Build MAG dataset on mag_creation_data
     print("Creating MAG dataset from training data")
     training_data = [
         {"question": item["question"],
@@ -1005,25 +1033,25 @@ def main():
     os.makedirs("data", exist_ok=True)
     with open("data/mag_dataset.pkl", "wb") as f:
         pickle.dump(mag_dataset, f)
-    
+
     print(f"Created MAG dataset with {len(mag_dataset)} examples")
-    
-    # Continue with the rest of the training process...
+
     # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.decomposer_model)
-    tokenizer.pad_token = tokenizer.eos_token
-    
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     # Prepare examples for Socratic model components
     print("Preparing examples for Socratic model components")
     decomposer_examples, solver_examples = prepare_socratic_examples(mag_dataset, tokenizer)
-    
+
     # Prepare positive and negative examples for contrastive learning
     print("Preparing examples for contrastive learning")
     pos_examples, neg_examples = prepare_pos_neg_examples(mag_dataset, tokenizer)
-    
+
     # Extract PyG graphs
     pyg_graphs = [item["pyg_data"] for item in mag_dataset]
-    
+
     # Create dataset
     dataset = MAGDiDataset(
         decomposer_examples=decomposer_examples,
@@ -1032,8 +1060,8 @@ def main():
         neg_examples=neg_examples,
         graphs=pyg_graphs
     )
-    
-    # Initialize model
+
+    # Initialize model (no LoRA)
     print("Initializing SocraticMAGDi model")
     model = SocraticMAGDi(
         decomposer_name=args.decomposer_model,
@@ -1046,35 +1074,7 @@ def main():
         gamma=args.gamma,
         delta=args.delta
     )
-    
-    # Apply LoRA if specified
-    if args.use_lora:
-        print("Applying LoRA for parameter-efficient fine-tuning")
-        
-        # Prepare decomposer for LoRA
-        model.decomposer.model = prepare_model_for_kbit_training(model.decomposer.model)
-        decomposer_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            target_modules=["c_attn", "c_proj"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM"
-        )
-        model.decomposer.model = get_peft_model(model.decomposer.model, decomposer_config)
-        
-        # Prepare solver for LoRA
-        model.solver.model = prepare_model_for_kbit_training(model.solver.model)
-        solver_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            target_modules=["c_attn", "c_proj"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM"
-        )
-        model.solver.model = get_peft_model(model.solver.model, solver_config)
-    
+
     # Initialize trainer
     training_args = TrainingArguments(
         output_dir=args.output_dir,
@@ -1090,24 +1090,104 @@ def main():
         fp16=True,
         report_to="tensorboard"
     )
-    
+
     trainer = SocraticMAGDiTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
         data_collator=SocraticMAGDiDataCollator(tokenizer)
     )
-    
+
     # Train model
     print("Training SocraticMAGDi model")
     trainer.train()
-    
-    # Save final model
-    print(f"Saving model to {args.output_dir}/final")
-    trainer.save_model(f"{args.output_dir}/final")
-    tokenizer.save_pretrained(f"{args.output_dir}/final")
-    
+
+    # Enhanced model saving for proper retrieval
+    print(f"Saving complete model to {args.output_dir}/final")
+
+    # Create final directory
+    final_dir = f"{args.output_dir}/final"
+    os.makedirs(final_dir, exist_ok=True)
+
+    # Save the complete model state dict
+    model_state_dict = model.state_dict()
+    torch.save(model_state_dict, os.path.join(final_dir, "pytorch_model.bin"))
+
+    # Save model configuration for reconstruction (no LoRA info)
+    model_config = {
+        "decomposer_name": args.decomposer_model,
+        "solver_name": args.solver_model,
+        "gcn_in_channels": args.gcn_in_channels,
+        "gcn_hidden_channels": args.gcn_hidden_channels,
+        "gcn_out_channels": args.gcn_out_channels,
+        "alpha": args.alpha,
+        "beta": args.beta,
+        "gamma": args.gamma,
+        "delta": args.delta,
+        "model_type": "SocraticMAGDi",
+        "torch_dtype": "float32",
+        "transformers_version": "4.36.0"
+    }
+
+    with open(os.path.join(final_dir, "config.json"), "w") as f:
+        json.dump(model_config, f, indent=2)
+
+    # Save tokenizer with proper configuration
+    tokenizer.save_pretrained(final_dir)
+
+    # Save training metadata (no LoRA info)
+    training_metadata = {
+        "training_args": {
+            "num_epochs": args.num_epochs,
+            "batch_size": args.batch_size,
+            "learning_rate": args.learning_rate,
+            "use_lora": False
+        },
+        "dataset_info": {
+            "num_examples": len(dataset),
+            "num_mag_graphs": len(mag_dataset)
+        },
+        "agent_weights": {agent["role"]: agent["weight"] for agent in agents}
+    }
+
+    with open(os.path.join(final_dir, "training_info.json"), "w") as f:
+        json.dump(training_metadata, f, indent=2)
+
+    # Additional safety: Save individual component states (simplified, no LoRA)
+    components_dir = os.path.join(final_dir, "components")
+    os.makedirs(components_dir, exist_ok=True)
+
+    # Save decomposer component
+    decomposer_state = {
+        "model_state_dict": model.decomposer.model.state_dict(),
+        "config": model.decomposer.model.config.to_dict() if hasattr(model.decomposer.model, 'config') else {}
+    }
+    torch.save(decomposer_state, os.path.join(components_dir, "decomposer.bin"))
+
+    # Save solver component
+    solver_state = {
+        "model_state_dict": model.solver.model.state_dict(),
+        "config": model.solver.model.config.to_dict() if hasattr(model.solver.model, 'config') else {}
+    }
+    torch.save(solver_state, os.path.join(components_dir, "solver.bin"))
+
+    # Save GCN component
+    gcn_state = {
+        "model_state_dict": model.gcn.state_dict(),
+        "in_channels": args.gcn_in_channels,
+        "hidden_channels": args.gcn_hidden_channels,
+        "out_channels": args.gcn_out_channels
+    }
+    torch.save(gcn_state, os.path.join(components_dir, "gcn.bin"))
+
+    print("Model saved successfully with all components!")
+    print(f"Main model: {os.path.join(final_dir, 'pytorch_model.bin')}")
+    print(f"Config: {os.path.join(final_dir, 'config.json')}")
+    print(f"Tokenizer: {final_dir}")
+    print(f"Components: {components_dir}")
+
     print("Training complete!")
+
 
 if __name__ == "__main__":
     main()
