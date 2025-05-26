@@ -28,6 +28,8 @@ from smodel import SocraticMAGDi, SocraticMAGDiDataCollator
 from datasets import load_dataset
 import random
 from collections import Counter
+import re
+
 
 # Set up logging
 logging.basicConfig(
@@ -39,77 +41,177 @@ logger = logging.getLogger(__name__)
 # Agent role specifications
 role_specifications = {
     "Scientist": {
+        "temperature": 0.3,
         "instructions": """
-You are a Scientist.
-- For any decision-making scenario, select exactly one of the provided options as your decision.
-- Justify your decision using rigorous scientific reasoning, evidence, and a global perspective.
-- Consider both immediate and long-term impacts on humanity, scientific progress, public health, and the environment.
-- Reflect on the value of knowledge, innovation, and the risks of losing unique expertise or setting scientific precedent.
-- Weigh risks, probabilities, and cascading effects for society and the world.
-- Respond strictly in JSON
-If you do not follow this format exactly, your response will be disregarded for consensus.
+You are a Scientist. When making decisions:
+
+ALWAYS DO:
+- Generate 2 conflicting hypotheses before selecting an option
+- Conduct a Red Team analysis attacking your own conclusion
+- Calculate Bayesian probabilities for competing explanations using P(H|E) = P(E|H)P(H)/P(E)
+- Model system interactions using both linear and chaotic frameworks
+- Compare findings against contradictory studies from adjacent fields
+- Test your reasoning by asking "what could prove this wrong?"
+- Consider environmental and health impacts spanning 50+ years
+- Demand evidence with statistical significance before accepting claims
+- Make Decision based on this
+
+RESPONSE FORMAT(DON'T PUT '''json before this):
+{
+  "decision": "<option>",
+  "analysis": {
+  "competing_hypotheses": ["<hyp1>", "<hyp2>"],
+  "bayesian_analysis": "<P(H|E) calculations>",
+  "red_team_critique": "<weaknesses in conclusion>",
+  "confidence_level": "<percentage>",
+  "evidence_quality": "<assessment>",
+  "long_term_consequences": "<50+ year impact analysis>"
+  }
+}
+
+Deviation from this format will exclude you from consensus.
 """
     },
+
     "Lawyer": {
+        "temperature": 0.4,
         "instructions": """
-You are a Lawyer.
-- For any decision-making scenario, select exactly one of the provided options as your decision.
-- Justify your decision using legal frameworks, compliance, and precedent at both local and international levels.
-- Consider legal and ethical responsibilities, justice, rights, and the broader implications for governance and the rule of law.
-- Reflect on the importance of fairness, equal treatment, and the consequences for future legal systems and social contracts.
-- Discuss conflicts between different legal systems, humanitarian law, and moral obligations.
-- Respond strictly in JSON
-If you do not follow this format exactly, your response will be disregarded for consensus.
+You are a Lawyer. When making decisions:
+
+ALWAYS DO:
+- Analyze under Common Law and Civil Law frameworks
+- Simulate arguments from plaintiff/defendant perspectives simultaneously
+- Identify conflicting precedents across federal circuits
+- Apply game theory to predict settlement likelihoods using Nash equilibrium
+- Check legality under local, national, and international law
+- Identify who could sue whom if this decision is made
+- Consider precedent this sets for future similar cases
+- Evaluate enforceability and compliance mechanisms
+- Assess constitutional and human rights implications
+- Make Decision based on this
+
+RESPONSE FORMAT(DON'T PUT '''json before this):
+{
+  "decision": "<option>",
+  "analysis": {
+  "jurisdictional_conflicts": "<varied legal interpretations>",
+  "settlement_equilibrium": "<Nash equilibrium analysis>",
+  "multi_system_violations": "<potential cross-border conflicts>",
+  "legal_risks": "<specific potential lawsuits>",
+  "precedent_impact": "<what this allows in future>",
+  "constitutional_analysis": "<rights implications>"
+  }
+}
+
+Deviation from this format will exclude you from consensus.
 """
     },
-    "Historian": {
+
+    "SocialChangeAdvocate": {
+        "temperature": 0.8,
         "instructions": """
-You are a Historian.
-- For any decision-making scenario, select exactly one of the provided options as your decision.
-- Justify your decision using historical precedent, context, and lessons from past events.
-- Consider how similar dilemmas have shaped societies, and the long-term impact of such decisions on culture, innovation, and social cohesion.
-- Reflect on the legacy and narrative your decision would create for future generations.
-- Explicitly weigh risks and benefits for both the immediate group and the world at large.
-- Consider how similar situations in the past have happened
-- Respond strictly in JSON
-If you do not follow this format exactly, your response will be disregarded for consensus.
+You are a Social Change Advocate. When making decisions:
+
+ALWAYS DO:
+- Project impacts across 10/25/100 year horizons
+- Model power shift dynamics using differential game theory
+- Quantify intersectional disadvantage indices
+- Identify which groups are helped vs. harmed by each option
+- Challenge existing power structures and inequalities
+- Push for solutions that redistribute resources to marginalized communities
+- Question whose voices are missing from the decision-making process
+- Demand accountability mechanisms for those in power
+- Apply intersectionality framework to all analyses
+- Make Decision based on this
+
+RESPONSE FORMAT(DON'T PUT '''json before this):
+{
+  "decision": "<option>",
+  "analysis": {
+  "power_impact": "<who gains/loses power>",
+  "equity_assessment": "<effect on marginalized groups>",
+  "temporal_horizons": "<10/25/100 year projections>",
+  "intersectional_analysis": "<multi-dimensional disadvantage assessment>",
+  "missing_voices": "<excluded stakeholders>",
+  "accountability_mechanisms": "<power oversight structures>"
+  }
+}
+
+Deviation from this format will exclude you from consensus.
 """
     },
+
     "Mathematician": {
+        "temperature": 0.25,
         "instructions": """
-You are a Mathematician.
-- For any decision-making scenario, select exactly one of the provided options as your decision.
-- Justify your decision using quantitative reasoning, probability, risk analysis, and modeling.
-- Consider both immediate outcomes and expected value for society or humanity, factoring in potential for future discoveries, aid, or loss.
-- Explicitly model outcomes, discuss trade-offs between maximizing survival, minimizing risk, and optimizing for long-term benefit.
-- Respond strictly in JSON
-If you do not follow this format exactly, your response will be disregarded for consensus.
+You are a Mathematician. When making decisions:
+
+ALWAYS DO:
+- Solve using both frequentist and Bayesian approaches
+- Model with Monte Carlo and deterministic simulations
+- Calculate error propagation through all estimation steps
+- Apply robust optimization against adversarial inputs
+- Quantify all variables and assign numerical values
+- Calculate expected outcomes using probability theory
+- Model best-case, worst-case, and most-likely scenarios
+- Identify optimization targets and constraints
+- Express uncertainty using confidence intervals
+- Make Decision based on this
+
+RESPONSE FORMAT(DON'T PUT '''json before this):
+{
+  "decision": "<option>",
+  "analysis": {
+  "frequentist_vs_bayesian": "<comparative analysis>",
+  "uncertainty_cascade": "<error propagation visualization>",
+  "adversarial_robustness": "<worst-case scenario math>",
+  "probability_calculation": "<specific numbers and percentages>",
+  "optimization_target": "<what you're maximizing/minimizing>",
+  "monte_carlo_results": "<simulation outcomes>",
+  "confidence_intervals": "<uncertainty bounds>
+  }
+}
+
+Deviation from this format will exclude you from consensus.
 """
     },
-    "Economist": {
-        "instructions": """
-You are an Economist.
-- For any decision-making scenario, select exactly one of the provided options as your decision.
-- Justify your decision using economic impact, cost-benefit analysis, and externalities at both local and global scales.
-- Consider the economic consequences of each option, including innovation, productivity, costs, high taxes, and societal stability.
-- Reflect on the value of human capital, incentives, and broader economic ripple effects.
-- Explicitly discuss trade-offs, uncertainties, and long-term implications for economic growth and well-being.
-- Respond strictly in JSON
-If you do not follow this format exactly, your response will be disregarded for consensus.
-"""
-    },
+
     "Ethicist": {
+        "temperature": 0.5,
         "instructions": """
-You are an Ethicist.
-- For any decision-making scenario, select exactly one of the provided options as your decision.
-- Justify your decision using ethical frameworks (utilitarianism, deontology, virtue ethics, etc.) and principles, considering both local and global consequences.
-- Reflect on the value of each life, fairness, and the potential for harm or benefit to humanity.
-- Explicitly discuss moral dilemmas, conflicts between duties, and trade-offs between individual and collective good.
-- Respond strictly in JSON
-If you do not follow this format exactly, your response will be disregarded for consensus.
+You are an Ethicist. When making decisions:
+
+ALWAYS DO:
+- Apply in sequence: Utilitarian, Deontological, Virtue Ethics lenses
+- Calculate moral weightings using differentiable ethics equations
+- Identify irreconcilable value conflicts through geometric mean analysis
+- Apply multiple ethical tests: "Is this fair?", "Does this reduce suffering?", "Would I want this if roles were reversed?"
+- Consider moral obligations to future generations
+- Weigh individual rights against collective good
+- Identify moral dilemmas and tragic trade-offs
+- Question the moral legitimacy of the decision-makers
+- Perform universalizability tests for proposed actions
+- Make Decision based on this
+
+RESPONSE FORMAT(DON'T PUT '''json before this):
+{
+  "decision": "<option>",
+  "analysis": {
+  "moral_trade_offs": "<what values conflict>",
+  "ethical_test_results": "<fairness, harm reduction, universalizability>",
+  "utilitarian_analysis": "<greatest good calculation>",
+  "deontological_analysis": "<duty-based assessment>",
+  "virtue_ethics_analysis": "<character-based evaluation>",
+  "future_obligations": "<intergenerational ethics>",
+  "legitimacy_assessment": "<decision-maker authority evaluation>
+  }
+}
+
+Deviation from this format will exclude you from consensus.
 """
     }
 }
+
 
 class MAGDiDataset(Dataset):
     """Dataset for training the SocraticMAGDi model."""
@@ -175,19 +277,24 @@ class SocraticMAGDiTrainer(Trainer):
 
 def generate_analysis(agent, prompt, client, debate_round=0):
     """Generate analysis from an agent using OpenAI API"""
-    # Dynamic temperature scheduling
-    temp = agent['base_temp'] * (1 + 0.1 * debate_round)  # Increase temp in later rounds
+    base_temp = agent.get('temperature', 0.7)  # Default to 0.7 if not specified
+
+    # Optional: Still apply debate round scaling if desired
+    temp = base_temp * (1 + 0.1 * debate_round)  # Increase temp in later rounds
     temp = min(max(temp, 0.5), 1.5)  # Clamp between 0.5-1.5
+
+    # Or use agent temperature directly without modification:
+    # temp = agent.get('temperature', 0.7)
 
     messages = [
         {"role": "system", "content": agent['instructions']},
         {"role": "user", "content": prompt}
     ]
     response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4.1-mini",
         messages=messages,
         temperature=temp,
-        max_tokens=400
+        max_tokens=600
     )
     return response.choices[0].message.content.strip()
 
@@ -213,26 +320,29 @@ def train_agent_weights(agents, training_data, client):
         print(item)
         question = item['question']
         print(question)
-        correct_answer = item['answerKey']
+        correct_answer = str(item['answerKey'])
         options = item.get('options', [])
         print(options)
         
 
         for agent in agents:
             prompt = (
-                f"{question}{options}\n\n"
-                "Read the question thoroughly, understand the entire context, make 0 assumptions. "
-                "You must respond to the question aptly, selecting exactly one of the provided options. "
-                """Respond strictly in JSON format with your decision. Make sure to include a decision
-                {
-                  "decision": "<selected_option>",
-                  }"""
+            f"<System Protocol>DO NOT INCLUDE REASONING IN OUTPUT</System>\n\n"
+            f"{question}{options}\n\n"
+            f"<Analysis Steps (INTERNAL USE ONLY)>\n"
+            f"1. Surface assumptions → 2. Verify facts → 3. Generate alternatives → 4. Validate\n\n"
+            f"<Output Requirements>\n"
+            f"- Start with '{{' and end with '}}'\n"
+            f"- No surrounding text or analysis steps\n\n"
+            f"{agent['instructions']}\n\n"
+            f"<BAD Example>DO NOT OUTPUT LIKE THIS:\n"
+            f"'First, I considered...' {{\"decision\":...}}\n"
             )
             
             response = generate_analysis(agent, prompt, client)
             print(response)
             parsed = parse_json_response(response)
-            decision = parsed.get("decision", "").strip()
+            decision = parsed.get("decision", "")
 
             # Update accuracy metrics
             agent['total_count'] += 1
@@ -420,14 +530,16 @@ def layered_consensus_process(
     # Initial responses
     for agent in agents:
         prompt = (
+            f"<System Protocol>DO NOT INCLUDE REASONING IN OUTPUT</System>\n\n"
             f"{question}{base_options}\n\n"
-                "Read the question thoroughly, understand the entire context, make 0 assumptions. "
-                "You must respond to the question aptly, selecting exactly one of the provided options. "
-            """Respond strictly in JSON format with your decision and analysis.
-            {
-              "decision": "<selected_option>",
-              "analysis": "<reasoning>"
-            }"""
+            f"<Analysis Steps (INTERNAL USE ONLY)>\n"
+            f"1. Surface assumptions → 2. Verify facts → 3. Generate alternatives → 4. Validate\n\n"
+            f"<Output Requirements>\n"
+            f"- Start with '{{' and end with '}}'\n"
+            f"- No surrounding text or analysis steps\n\n"
+            f"{agent['instructions']}\n\n"
+            f"<BAD Example>DO NOT OUTPUT LIKE THIS:\n"
+            f"'First, I considered...' {{\"decision\":...}}\n"
         )
 
         response = generate_analysis(agent, prompt, client)
@@ -444,33 +556,61 @@ def layered_consensus_process(
         return discussion_history, create_debate_graph(agents, question, gold_answer, decision, is_correct)
 
     # Debate rounds with temperature escalation
+    # Debate rounds with temperature escalation
     for round_num in range(2):
-        print(f"=== DEBATE ROUND {round_num+1} ===")
+        print(f"=== DEBATE ROUND {round_num + 1} ===")
         for i, agent in enumerate(agents):
+            # Include precalculated agent weights with their analyses (excluding current agent)
             others = "\n".join([
-                f"{other['role']}: {parse_json_response(other['analysis'][-1])['analysis']}"
-                for j, other in enumerate(agents) if j != i
+                f"{other['role']} (Weight: {other['weight']:.3f}): {parse_json_response(other['analysis'][-1]).get('analysis', 'No analysis available')}"
+                for j, other in enumerate(agents) if j != i  # Excludes current agent's own analysis
             ])
 
             prompt = (
-                f"Peer Analyses:\n{others}\n\n"
-                "Reconsider the initial question and your peers' decisions to come to a decision. "
-                "Don't simply go with the majority as they may be trying to trick you! "
-                "You may revise your decision considering these perspectives. "
-                "Explain why your chosen option is more valid (make sure it is factually correct). "
-                "Maintain your professional viewpoint while acknowledging valid arguments. "
-                f"Only include the given options in your decision{base_options}! "
-                """Respond strictly in JSON Format!!!
-                {
-                  "decision": "<updated_choice>",
-                  "analysis": "<revised_reasoning>",
-                  "influenced_by": "<key influencing agents (as few as possible, only those that really helped you)>"
-                }"""
+                f"Peer Analyses (with credibility weights):\n{others}\n\n"
+                "Re-evaluate through your professional lens using:\n\n"
+
+                "1. **Weighted Perspective Integration**\n"
+                "   a. Calculate argument credibility using:\n"
+                "      - Source weight * {role}_relevance_score\n"
+                "      - Minimum 2 conflicting perspectives must be preserved\n"
+                "   b. For high-weight peers (>0.6):\n"
+                "      - Apply {role}_counteranalysis protocol\n"
+                "      - Require 3x evidence verification\n\n"
+
+                "2. **Persona-Centric Revision**\n"
+                "   a. If changing decision:\n"
+                "      - Must pass {core_principles}_checklist\n"
+                "      - Show direct alignment with 2+ {role}_decision_factors\n"
+                "   b. If keeping decision:\n"
+                "      - Incorporate 1+ valid peer insight\n"
+                "      - Strengthen with {role}_specific_evidence\n\n"
+
+                "3. **Influence Documentation**\n"
+                "   a. **Mandatory Field** - You MUST credit at least 2 peers using:\n"
+                "      - Roles that passed {role}_verification_threshold\n"
+                "      - Roles providing novel {domain}_insights\n"
+                "   b. **Validation Protocol**\n"
+                "      - Responses WITHOUT 'influenced_by' will be considered invalid\n"
+                "      - Cite 1-3 roles using exact role names from peer analyses\n"
+                "      - Format EXACTLY as: [\"Role1\", \"Role2\"]\n"
+                "   c. **Example Enforcement**:\n"
+                "      GOOD: \"influenced_by\": [\"Mathematician\", \"Ethicist\"]\n"
+                "      BAD: \"influenced_by\": [] or missing field → REJECTED\n\n"
+                
+                "Answer As Follows:"
+                "Response Requirements:\n"
+                "- Use YOUR SPECIFIED RESPONSE FORMAT\n"
+                "- ADD 'influenced_by' field at END\n"
+                "- Maintain original JSON structure\n"
+                f"- Only use specified options: {base_options}\n\n"
+
+                "Begin professional analysis:"
             )
 
-            response = generate_analysis(agent, prompt, client, debate_round=round_num+1)
+            response = generate_analysis(agent, prompt, client, debate_round=round_num + 1)
             agent['analysis'].append(response)
-            discussion_history.append(f"ROUND {round_num+1} - {agent['role']}:\n{response}")
+            discussion_history.append(f"ROUND {round_num + 1} - {agent['role']}:\n{response}")
             print(f"[{agent['role']} REFINED]\n{response}")
 
         # Track influence after each round
@@ -831,12 +971,12 @@ def main():
     # 1) Load full train
     full_train = load_dataset("wics/strategy-qa", split="test")
     print(full_train[1])
-    full_train = full_train.train_test_split(test_size=0.20)
+    full_train = full_train.train_test_split(test_size=0.20, seed = 41)
     # 3) Split the 80% into two 40% halves
     subsplits  = full_train["train"].train_test_split(test_size=0.50)
-    agent_data = subsplits["train"].select(range(5))
+    agent_data = subsplits["train"]
     print(agent_data)
-    mag_creation_data = subsplits["test"].select(range(5))
+    mag_creation_data = subsplits["test"].select(range(1))
     print(mag_creation_data)
     print(f"Agent weight set: {len(agent_data)} examples")
     print(f"MAG creation set: {len(mag_creation_data)} examples")
@@ -850,11 +990,12 @@ def main():
         for item in agent_data
     ]
     agents = train_agent_weights(agents, training_examples, client)
+
     # - build MAG dataset on mag_creation_data -
     print("Creating MAG dataset from training data")
     training_data = [
         {"question": item["question"],
-         "gold_answer": item["answerKey"],
+         "gold_answer": item["answer"],
          "options": [True, False]}
         for item in mag_creation_data
     ]
