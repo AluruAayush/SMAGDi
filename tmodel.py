@@ -50,86 +50,74 @@ class TreeOfThoughtComponent(nn.Module):
 
 class TreeOfThoughtMAGDi(nn.Module):
     def __init__(self, model_name, gcn_in_channels, gcn_hidden_channels, 
-                 gcn_out_channels, alpha=1.0, beta=1.0, gamma=0.1, delta=0.5):
+                 gcn_out_channels, alpha=1.0, beta=1.0, gamma=0.1):
         super().__init__()
 
-        self.decomposer = TreeOfThoughtComponent(model_name)
-        self.solver = TreeOfThoughtComponent(model_name)
+        # Single Tree of Thought component only
+        self.tot_component = TreeOfThoughtComponent(model_name)
 
         self.gcn = GCN(gcn_in_channels, gcn_hidden_channels, gcn_out_channels)
 
-        self.mlp1 = Linear(self.decomposer.hidden_size, self.decomposer.hidden_size)
-        self.mlp2 = Linear(self.decomposer.hidden_size, 1)
+        self.mlp1 = Linear(self.tot_component.hidden_size, self.tot_component.hidden_size)
+        self.mlp2 = Linear(self.tot_component.hidden_size, 1)
 
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
-        self.delta = delta
 
-    def forward(self, decomposer_input_ids, decomposer_attention_mask, decomposer_labels,
-                solver_input_ids, solver_attention_mask, solver_labels,
+    def forward(self, input_ids, attention_mask, labels,
                 pos_input_ids, pos_attention_mask, pos_labels,
                 neg_input_ids, neg_attention_mask, neg_labels, graph):
 
-        decomposer_loss, decomposer_emb = self.decomposer(
-            decomposer_input_ids, decomposer_attention_mask, decomposer_labels
-        )
+        # Main ToT loss and embedding
+        tot_loss, tot_emb = self.tot_component(input_ids, attention_mask, labels)
 
-        solver_loss, solver_emb = self.solver(
-            solver_input_ids, solver_attention_mask, solver_labels
-        )
+        # Positive and negative examples embeddings and losses
+        pos_loss, pos_emb = self.tot_component(pos_input_ids, pos_attention_mask, pos_labels)
+        _, neg_emb = self.tot_component(neg_input_ids, neg_attention_mask, None)
 
-        pos_loss, pos_emb = self.solver(
-            pos_input_ids, pos_attention_mask, pos_labels
-        )
-
-        _, neg_emb = self.solver(
-            neg_input_ids, neg_attention_mask, None
-        )
-
+        # Filter negatives with enough tokens
         row_sums = neg_attention_mask.sum(dim=1)
         neg_mask = row_sums > 5
-
         if neg_mask.any():
             neg_mask = neg_mask.to(pos_emb.device)
             pos_emb = pos_emb[neg_mask]
             neg_emb = neg_emb[neg_mask]
 
+        # Compute scores for positive and negative embeddings
         pos_h = torch.relu(self.mlp1(pos_emb))
         pos_score = torch.tanh(self.mlp2(pos_h))
 
         neg_h = torch.relu(self.mlp1(neg_emb))
         neg_score = torch.tanh(self.mlp2(neg_h))
 
+        # Visualization of losses (only ToT and contrastive)
         if self.training:
             print("--- Visualization: Loss Components ---")
-            print(f"Decomposer Loss: {decomposer_loss.item():.4f}")
-            print(f"Solver Loss:     {solver_loss.item():.4f}")
-            print(f"Positive Loss:   {pos_loss.item():.4f}")
-            print(f"Alignment Loss:  {F.mse_loss(decomposer_emb, solver_emb).item():.4f}")
+            print(f"Tree of Thought Loss: {tot_loss.item():.4f}")
+            print(f"Positive Loss:        {pos_loss.item():.4f}")
             print("Contrastive Scores (ToT pos vs neg):")
             for i in range(min(5, pos_score.size(0))):
                 print(f"Sample {i}: pos_score = {pos_score[i].item():.4f}, neg_score = {neg_score[i].item():.4f}")
 
-        mr_cri = nn.MarginRankingLoss(1.0, reduction='mean').to(pos_score.device) # margin ranking loss criterion
-        mr_loss = mr_cri(pos_score, neg_score, torch.ones_like(pos_score).to(pos_score.device)) # loss computed by line above 
+        # Contrastive margin ranking loss between pos and neg scores
+        mr_cri = nn.MarginRankingLoss(1.0, reduction='mean').to(pos_score.device)
+        mr_loss = mr_cri(pos_score, neg_score, torch.ones_like(pos_score).to(pos_score.device))
 
+        # Process graph with GCN
         from torch_geometric.loader import DataLoader
         graph_loader = DataLoader(graph, batch_size=len(graph), shuffle=False, pin_memory=False, num_workers=0)
         graph_batch = next(iter(graph_loader))
 
         gcn_output, logits = self.gcn(graph_batch.x, graph_batch.edge_index)
         graph_batch.y = graph_batch.y.to(logits.device)
-        ce_cri = nn.CrossEntropyLoss() # cross-entropy loss criterion 
+        ce_cri = nn.CrossEntropyLoss()
         node_loss = ce_cri(logits, graph_batch.y)
 
-        alignment_loss = F.mse_loss(decomposer_emb, solver_emb)
-
         return (
-            self.alpha * (decomposer_loss + solver_loss + pos_loss), 
+            self.alpha * (tot_loss + pos_loss), 
             self.beta * node_loss, 
             self.gamma * mr_loss,
-            self.delta * alignment_loss
         )
 
 class TreeOfThoughtMAGDiDataCollator:
@@ -137,13 +125,9 @@ class TreeOfThoughtMAGDiDataCollator:
         self.tokenizer = tokenizer
 
     def __call__(self, batch):
-        decomposer_input_ids = torch.stack([item["decomposer_input_ids"] for item in batch])
-        decomposer_attention_mask = torch.stack([item["decomposer_attention_mask"] for item in batch])
-        decomposer_labels = torch.stack([item["decomposer_labels"] for item in batch])
-
-        solver_input_ids = torch.stack([item["solver_input_ids"] for item in batch])
-        solver_attention_mask = torch.stack([item["solver_attention_mask"] for item in batch])
-        solver_labels = torch.stack([item["solver_labels"] for item in batch])
+        input_ids = torch.stack([item["input_ids"] for item in batch])
+        attention_mask = torch.stack([item["attention_mask"] for item in batch])
+        labels = torch.stack([item["labels"] for item in batch])
 
         pos_input_ids = torch.stack([item["pos_input_ids"] for item in batch])
         pos_attention_mask = torch.stack([item["pos_attention_mask"] for item in batch])
@@ -156,12 +140,9 @@ class TreeOfThoughtMAGDiDataCollator:
         graphs = [item["graph"] for item in batch]
 
         return {
-            "decomposer_input_ids": decomposer_input_ids,
-            "decomposer_attention_mask": decomposer_attention_mask,
-            "decomposer_labels": decomposer_labels,
-            "solver_input_ids": solver_input_ids,
-            "solver_attention_mask": solver_attention_mask,
-            "solver_labels": solver_labels,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
             "pos_input_ids": pos_input_ids,
             "pos_attention_mask": pos_attention_mask,
             "pos_labels": pos_labels,
