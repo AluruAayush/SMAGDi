@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, Linear
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 
 class GCN(torch.nn.Module):
     """Graph Convolutional Network for processing multi-agent interaction graphs."""
@@ -45,7 +45,6 @@ class DraftingComponent(nn.Module):
             projected = self.projection(pooled)
             drafts.append((outputs.loss, projected))
 
-        # Aggregate losses and embeddings
         loss = torch.stack([draft[0] for draft in drafts]).mean()
         embedding = torch.stack([draft[1] for draft in drafts]).mean(dim=0)
 
@@ -61,7 +60,6 @@ class ChainOfDraftMAGDi(nn.Module):
         super().__init__()
         
         self.drafter = DraftingComponent(model_name)
-        self.solver = DraftingComponent(model_name)
         
         self.gcn = GCN(gcn_in_channels, gcn_hidden_channels, gcn_out_channels)
         
@@ -73,26 +71,15 @@ class ChainOfDraftMAGDi(nn.Module):
         self.gamma = gamma
         self.delta = delta
 
-    def forward(self, decomposer_input_ids, decomposer_attention_mask, decomposer_labels,
-                solver_input_ids, solver_attention_mask, solver_labels,
+    def forward(self, input_ids, attention_mask, labels,
                 pos_input_ids, pos_attention_mask, pos_labels,
                 neg_input_ids, neg_attention_mask, neg_labels, graph):
 
-        decomposer_loss, decomposer_emb = self.drafter(
-            decomposer_input_ids, decomposer_attention_mask, decomposer_labels
-        )
+        main_loss, main_emb = self.drafter(input_ids, attention_mask, labels)
 
-        solver_loss, solver_emb = self.solver(
-            solver_input_ids, solver_attention_mask, solver_labels
-        )
+        pos_loss, pos_emb = self.drafter(pos_input_ids, pos_attention_mask, pos_labels)
 
-        pos_loss, pos_emb = self.solver(
-            pos_input_ids, pos_attention_mask, pos_labels
-        )
-
-        _, neg_emb = self.solver(
-            neg_input_ids, neg_attention_mask, None
-        )
+        _, neg_emb = self.drafter(neg_input_ids, neg_attention_mask, None)
 
         row_sums = neg_attention_mask.sum(dim=1)
         neg_mask = row_sums > 5
@@ -108,7 +95,6 @@ class ChainOfDraftMAGDi(nn.Module):
         neg_h = torch.relu(self.mlp1(neg_emb))
         neg_score = torch.tanh(self.mlp2(neg_h))
 
-        # Logging for visualization
         if self.training:
             print("Contrastive Scores (pos vs neg):")
             for i in range(min(5, pos_score.size(0))):
@@ -126,10 +112,11 @@ class ChainOfDraftMAGDi(nn.Module):
         ce_cri = torch.nn.CrossEntropyLoss()
         node_loss = ce_cri(logits, graph_batch.y)
 
-        alignment_loss = F.mse_loss(decomposer_emb, solver_emb)
+        # Alignment loss between main embedding and positive embedding (optional)
+        alignment_loss = F.mse_loss(main_emb, pos_emb)
 
         return (
-            self.alpha * (decomposer_loss + solver_loss + pos_loss), 
+            self.alpha * (main_loss + pos_loss), 
             self.beta * node_loss, 
             self.gamma * mr_loss,
             self.delta * alignment_loss
@@ -140,13 +127,9 @@ class ChainOfDraftMAGDiDataCollator:
         self.tokenizer = tokenizer
 
     def __call__(self, batch):
-        decomposer_input_ids = torch.stack([item["decomposer_input_ids"] for item in batch])
-        decomposer_attention_mask = torch.stack([item["decomposer_attention_mask"] for item in batch])
-        decomposer_labels = torch.stack([item["decomposer_labels"] for item in batch])
-
-        solver_input_ids = torch.stack([item["solver_input_ids"] for item in batch])
-        solver_attention_mask = torch.stack([item["solver_attention_mask"] for item in batch])
-        solver_labels = torch.stack([item["solver_labels"] for item in batch])
+        input_ids = torch.stack([item["input_ids"] for item in batch])
+        attention_mask = torch.stack([item["attention_mask"] for item in batch])
+        labels = torch.stack([item["labels"] for item in batch])
 
         pos_input_ids = torch.stack([item["pos_input_ids"] for item in batch])
         pos_attention_mask = torch.stack([item["pos_attention_mask"] for item in batch])
@@ -159,12 +142,9 @@ class ChainOfDraftMAGDiDataCollator:
         graphs = [item["graph"] for item in batch]
 
         return {
-            "decomposer_input_ids": decomposer_input_ids,
-            "decomposer_attention_mask": decomposer_attention_mask,
-            "decomposer_labels": decomposer_labels,
-            "solver_input_ids": solver_input_ids,
-            "solver_attention_mask": solver_attention_mask,
-            "solver_labels": solver_labels,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
             "pos_input_ids": pos_input_ids,
             "pos_attention_mask": pos_attention_mask,
             "pos_labels": pos_labels,
