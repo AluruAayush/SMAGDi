@@ -18,12 +18,13 @@ from transformers import (
 )
 import openai
 
-from smodel import SocraticMAGDi, SocraticMAGDiDataCollator
+#from smodel import SocraticMAGDi, SocraticMAGDiDataCollator
 from datasets import load_dataset
 import random
 from collections import Counter
 import re
 import sys
+import tensorboardX
 
 # Agent role specifications
 role_specifications = {
@@ -872,165 +873,285 @@ def prepare_socratic_examples(mag_dataset, tokenizer):
 
 
 def prepare_pos_neg_examples(mag_dataset, tokenizer, max_path_length=4):
-    """Prepare positive/negative examples based on reasoning chain correctness"""
-    pos_examples = []  # List of lists (one per MAG item)
-    neg_examples = []  # List of lists (one per MAG item)
+    """Prepare positive/negative examples with correct input-label pairs"""
+    pos_examples = []
+    neg_examples = []
 
     for item in mag_dataset:
         question = item["question"]
         graph = item["graph"]
-
-        # Per-item lists
+        
         item_pos = []
         item_neg = []
 
-        # Get question node and response nodes
-        question_node = "question"
+        # Get response nodes
         response_nodes = [
             n for n, data in graph.nodes(data=True)
             if data.get('type') in ['response', 'initial_response']
         ]
 
-        # Find all simple paths from question to each response node
-        pos_nodes = set()
-        neg_nodes = set()
+        # Process positive examples (correct reasoning)
+        correct_nodes = [
+            n for n in response_nodes 
+            if graph.nodes[n].get('is_correct', False)
+        ]
+        
+        for node in correct_nodes[:3]:  # Limit to 3 examples per item
+            content = graph.nodes[node].get('content', '')
+            if not content or len(content.strip()) < 10:
+                continue  # Skip empty or very short content
+                
+            # Create proper prompt-completion pair
+            prompt = f"Question: {question}\nProvide valid reasoning:"
+            
+            # Tokenize prompt and completion separately
+            prompt_tokens = tokenizer(
+                prompt,
+                truncation=True,
+                max_length=256,  # Shorter to leave room for completion
+                padding=False,
+                return_tensors="pt"
+            )
+            
+            completion_tokens = tokenizer(
+                content,
+                truncation=True,
+                max_length=256,
+                padding=False,
+                return_tensors="pt"
+            )
+            
+            # Create input_ids by concatenating prompt + completion
+            input_ids = torch.cat([
+                prompt_tokens.input_ids[0],
+                completion_tokens.input_ids[0]
+            ])
+            
+            # Create labels: -100 for prompt tokens, completion tokens for loss
+            labels = torch.cat([
+                torch.full((len(prompt_tokens.input_ids[0]),), -100),  # Ignore prompt in loss
+                completion_tokens.input_ids[0]  # Predict completion
+            ])
+            
+            # Pad to max_length
+            max_len = 512
+            if len(input_ids) > max_len:
+                input_ids = input_ids[:max_len]
+                labels = labels[:max_len]
+            else:
+                # Pad with tokenizer.pad_token_id
+                pad_length = max_len - len(input_ids)
+                input_ids = torch.cat([
+                    input_ids,
+                    torch.full((pad_length,), tokenizer.pad_token_id)
+                ])
+                labels = torch.cat([
+                    labels,
+                    torch.full((pad_length,), -100)  # Ignore padding in loss
+                ])
+            
+            # Create attention mask
+            attention_mask = (input_ids != tokenizer.pad_token_id).long()
+            
+            item_pos.append({
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels
+            })
 
-        for target in response_nodes:
-            try:
-                # Get all paths with limited depth to prevent combinatorial explosion
-                paths = nx.all_simple_paths(
-                    graph,
-                    source=question_node,
-                    target=target,
-                    cutoff=max_path_length
-                )
-
-                # Check if target node is correct
-                is_correct = graph.nodes[target].get('is_correct', False)
-
-                for path in paths:
-                    if is_correct:
-                        pos_nodes.update(path)
-                    else:
-                        neg_nodes.update(path)
-
-            except nx.NetworkXNoPath:
+        # Process negative examples (incorrect reasoning)
+        incorrect_nodes = [
+            n for n in response_nodes 
+            if not graph.nodes[n].get('is_correct', False)
+        ]
+        
+        for node in incorrect_nodes[:3]:  # Limit to 3 examples per item
+            content = graph.nodes[node].get('content', '')
+            if not content or len(content.strip()) < 10:
                 continue
+                
+            prompt = f"Question: {question}\nIdentify flawed reasoning:"
+            
+            # Same process as positive examples
+            prompt_tokens = tokenizer(
+                prompt,
+                truncation=True,
+                max_length=256,
+                padding=False,
+                return_tensors="pt"
+            )
+            
+            completion_tokens = tokenizer(
+                content,
+                truncation=True,
+                max_length=256,
+                padding=False,
+                return_tensors="pt"
+            )
+            
+            input_ids = torch.cat([
+                prompt_tokens.input_ids[0],
+                completion_tokens.input_ids[0]
+            ])
+            
+            labels = torch.cat([
+                torch.full((len(prompt_tokens.input_ids[0]),), -100),
+                completion_tokens.input_ids[0]
+            ])
+            
+            # Pad to max_length
+            max_len = 512
+            if len(input_ids) > max_len:
+                input_ids = input_ids[:max_len]
+                labels = labels[:max_len]
+            else:
+                pad_length = max_len - len(input_ids)
+                input_ids = torch.cat([
+                    input_ids,
+                    torch.full((pad_length,), tokenizer.pad_token_id)
+                ])
+                labels = torch.cat([
+                    labels,
+                    torch.full((pad_length,), -100)
+                ])
+            
+            attention_mask = (input_ids != tokenizer.pad_token_id).long()
+            
+            item_neg.append({
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels
+            })
 
-        # Process positive examples (correct reasoning chains)
-        for node in pos_nodes:
-            if 'content' in graph.nodes[node]:
-                content = graph.nodes[node]['content']
-
-                # Create example showing reasoning chain context
-                prompt = f"Question: {question}\nValid Reasoning Step:"
-                completion = content
-
-                tokens = tokenizer(
-                    prompt,
-                    completion,
-                    truncation=True,
-                    max_length=512,
-                    padding="max_length",
-                    return_tensors="pt"
-                )
-                item_pos.append({
-                    "input_ids": tokens.input_ids[0],
-                    "attention_mask": tokens.attention_mask[0],
-                    "labels": tokens.input_ids[0].clone()
-                })
-
-        # Process negative examples (incorrect reasoning chains)
-        for node in neg_nodes:
-            if 'content' in graph.nodes[node]:
-                content = graph.nodes[node]['content']
-
-                # Create example showing flawed reasoning context
-                prompt = f"Question: {question}\nFlawed Reasoning Step:"
-                completion = content
-
-                tokens = tokenizer(
-                    prompt,
-                    completion,
-                    truncation=True,
-                    max_length=512,
-                    padding="max_length",
-                    return_tensors="pt"
-                )
-                item_neg.append({
-                    "input_ids": tokens.input_ids[0],
-                    "attention_mask": tokens.attention_mask[0],
-                    "labels": tokens.input_ids[0].clone()
-                })
-        # Add per-item lists to main lists
         pos_examples.append(item_pos)
         neg_examples.append(item_neg)
 
     return pos_examples, neg_examples
+def validate_and_fix_examples(pos_examples, neg_examples, tokenizer):
+    """Fix malformed examples that cause NaN losses"""
+    fixed_pos = []
+    fixed_neg = []
+    
+    for i, (pos_list, neg_list) in enumerate(zip(pos_examples, neg_examples)):
+        # Fix positive examples
+        if not pos_list:  # Empty list
+            # Create dummy positive example
+            dummy_text = "This is a valid reasoning step."
+            tokens = tokenizer(
+                dummy_text,
+                truncation=True,
+                max_length=512,
+                padding="max_length",
+                return_tensors="pt"
+            )
+            pos_list = [{
+                "input_ids": tokens.input_ids[0],
+                "attention_mask": tokens.attention_mask[0],
+                "labels": tokens.input_ids[0].clone()
+            }]
+        else:
+            # Validate existing examples
+            validated_pos = []
+            for pos_item in pos_list:
+                # Check for valid tensors
+                if (torch.is_tensor(pos_item.get("input_ids")) and 
+                    torch.is_tensor(pos_item.get("attention_mask")) and
+                    torch.is_tensor(pos_item.get("labels"))):
+                    
+                    # Check for all-zero or invalid tokens
+                    if pos_item["input_ids"].sum() > 0:
+                        validated_pos.append(pos_item)
+            
+            if not validated_pos:  # All examples were invalid
+                # Create dummy
+                dummy_text = "This is a valid reasoning step."
+                tokens = tokenizer(
+                    dummy_text,
+                    truncation=True,
+                    max_length=512,
+                    padding="max_length",
+                    return_tensors="pt"
+                )
+                pos_list = [{
+                    "input_ids": tokens.input_ids[0],
+                    "attention_mask": tokens.attention_mask[0],
+                    "labels": tokens.input_ids[0].clone()
+                }]
+            else:
+                pos_list = validated_pos
+        
+        # Same validation for negative examples
+        if not neg_list:
+            dummy_text = "This is a flawed reasoning step."
+            tokens = tokenizer(
+                dummy_text,
+                truncation=True,
+                max_length=512,
+                padding="max_length",
+                return_tensors="pt"
+            )
+            neg_list = [{
+                "input_ids": tokens.input_ids[0],
+                "attention_mask": tokens.attention_mask[0],
+                "labels": tokens.input_ids[0].clone()
+            }]
+        
+        fixed_pos.append(pos_list)
+        fixed_neg.append(neg_list)
+    
+    return fixed_pos, fixed_neg
 
+
+# Cell: Main Training Function (Jupyter Compatible)
 def main():
-    parser = argparse.ArgumentParser(description="Train a SocraticMAGDi model")
-
-    # Model configuration with improved defaults
-    parser.add_argument("--decomposer_model", type=str, default="Qwen/Qwen2-1.5B",
-                        help="Model name for the decomposer")
-    parser.add_argument("--solver_model", type=str, default="Qwen/Qwen2-1.5B",
-                        help="Model name for the solver")
-    parser.add_argument("--model_size", type=str, default="small",
-                        choices=["small", "medium", "large"],
-                        help="Size of base models to use")
-    parser.add_argument("--gcn_in_channels", type=int, default=768,
-                        help="Input dimension for GCN")
-    parser.add_argument("--gcn_hidden_channels", type=int, default=256,
-                        help="Hidden dimension for GCN")
-    parser.add_argument("--gcn_out_channels", type=int, default=4,
-                        help="Output dimension for GCN (number of node classes)")
-
+    # Configuration Variables (Replace all args with direct variables)
+    torch.cuda.empty_cache()
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"CUDA device count: {torch.cuda.device_count()}")
+    if torch.cuda.is_available():
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+    SEED = 42
+    MODEL_SIZE = "small"  # choices: "small", "medium", "large"
+    DECOMPOSER_MODEL = "Qwen/Qwen2-1.5B"
+    SOLVER_MODEL = "Qwen/Qwen2-1.5B"
+    OUTPUT_DIR = "outputs"
+    
+    # GCN Configuration
+    GCN_IN_CHANNELS = 768
+    GCN_HIDDEN_CHANNELS = 256
+    GCN_OUT_CHANNELS = 4
+    
     # Loss weights
-    parser.add_argument("--alpha", type=float, default=1.0,
-                        help="Weight for language modeling loss")
-    parser.add_argument("--beta", type=float, default=1.0,
-                        help="Weight for node classification loss")
-    parser.add_argument("--gamma", type=float, default=0.1,
-                        help="Weight for contrastive loss")
-    parser.add_argument("--delta", type=float, default=0.5,
-                        help="Weight for decomposer-solver alignment loss")
-
+    ALPHA = 1.0  # Weight for language modeling loss
+    BETA = 1.0   # Weight for node classification loss
+    GAMMA = 0.1  # Weight for contrastive loss
+    DELTA = 0.5  # Weight for decomposer-solver alignment loss
+    
     # Training configuration
-    parser.add_argument("--dataset_path", type=str, default="data/dataset.json",
-                        help="Path to dataset file")
-    parser.add_argument("--output_dir", type=str, default="outputs",
-                        help="Output directory for model checkpoints")
-    parser.add_argument("--batch_size", type=int, default=4,
-                        help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=5,
-                        help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=5e-5,
-                        help="Learning rate")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed")
-    parser.add_argument("--train_ratio", type=float, default=0.5,
-                        help="Ratio of data to use for training (default: 0.5)")
-
-    args = parser.parse_args()
-    set_seed(args.seed)
+    NUM_EPOCHS = 5
+    BATCH_SIZE = 2
+    LEARNING_RATE = 1e-6
+    
+    # OpenAI API Key
+    OPENAI_API_KEY = ENV[‘AUTH_TOKEN’]
+    
+    set_seed(SEED)
 
     # Update model selection based on size
-    recommended_models = get_recommended_model(args.model_size)
-    if args.decomposer_model == "Qwen/Qwen2-1.5B" and args.model_size != "small":  # If using default
-        args.decomposer_model = recommended_models["decomposer"]
-    if args.solver_model == "Qwen/Qwen2-1.5B" and args.model_size != "small":  # If using default
-        args.solver_model = recommended_models["solver"]
+    recommended_models = get_recommended_model(MODEL_SIZE)
+    if DECOMPOSER_MODEL == "Qwen/Qwen2-1.5B" and MODEL_SIZE != "small":
+        DECOMPOSER_MODEL = recommended_models["decomposer"]
+    if SOLVER_MODEL == "Qwen/Qwen2-1.5B" and MODEL_SIZE != "small":
+        SOLVER_MODEL = recommended_models["solver"]
 
-    print(f"Using decomposer model: {args.decomposer_model}")
-    print(f"Using solver model: {args.solver_model}")
+    print(f"Using decomposer model: {DECOMPOSER_MODEL}")
+    print(f"Using solver model: {SOLVER_MODEL}")
 
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Initialize OpenAI client
-    os.environ[
-        "OPENAI_API_KEY"] = ENV[‘AUTH_TOKEN’]
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     # Initialize agents
@@ -1041,36 +1162,27 @@ def main():
             "instructions": role_specifications[role]["instructions"],
             "analysis": [],
             "previous_positions": [],
-            "base_temp": 0.8 + random.uniform(-0.7, 0.7),  # Unique base temp per agent
-            "weight": 1.0,  # Default weight, will be updated during training
-            "accuracy": 0.0,  # Will track accuracy during training
-            "influence_score": 0.0  # Will track how often this agent influences others
+            "base_temp": 0.8 + random.uniform(-0.7, 0.7),
+            "weight": 1.0,
+            "accuracy": 0.0,
+            "influence_score": 0.0
         } for i, role in enumerate(role_specifications)
     ]
 
     # Load dataset
     full_train = load_dataset("wics/strategy-qa", split="test")
-    print(full_train[1])
+    print("Sample data:", full_train[1])
     full_train = full_train.train_test_split(test_size=0.20, seed=41)
 
     # Split the 80% into two 40% halves
     subsplits = full_train["train"].train_test_split(test_size=0.50)
     agent_data = subsplits["train"]
-    print(agent_data)
     mag_creation_data = subsplits["test"]
-    print(mag_creation_data)
+    
     print(f"Agent weight set: {len(agent_data)} examples")
     print(f"MAG creation set: {len(mag_creation_data)} examples")
 
-    # Train agent weights on agent_data
-    print("Training agent weights using training data")
-    training_examples = [
-        {"question": item["question"],
-         "answerKey": item["answer"],
-         "options": [True, False]}
-        for item in agent_data
-    ]
-    #agents = train_agent_weights(agents, training_examples, client)
+    # Set pre-computed agent weights (faster than training)
     for agent in agents:
         if agent["role"] == "Scientist":
             agent["weight"] = 0.2013
@@ -1082,84 +1194,12 @@ def main():
             agent["weight"] = 0.2031
         else:
             agent["weight"] = 0.1992
-    # Build MAG dataset on mag_creation_data
-    print("Creating MAG dataset from training data")
-    training_data = [
-        {"question": item["question"],
-         "gold_answer": item["answer"],
-         "options": [True, False]}
-        for item in mag_creation_data
-    ]
-    """ mag_dataset = create_mag_dataset(training_data, agents, client)
-
-    # Save MAG dataset
-    os.makedirs("data", exist_ok=True)
-    with open("data/mag_dataset.pkl", "wb") as f:
-        pickle.dump(mag_dataset, f)
-
-    # ADD THIS CODE HERE - Calculate Final Consensus Accuracy Only
-    print("\n=== Multi-Agent System (MAS) Final Consensus Accuracy ===")
-
-    # Extract final consensus decisions for each question
-    consensus_results = []
-    for item in mag_dataset:
-        question = item["question"]
-        graph = item["graph"]
-
-        # Method 1: Check if any node represents final consensus
-        final_decision = None
-        gold_answer = None
-
-        # Look for consensus decision in graph nodes
-        for node_id, node_data in graph.nodes(data=True):
-            if node_data.get('type') in ['response', 'initial_response']:
-                # Get the decision and gold answer from any response node
-                if node_data.get('decision') and node_data.get('gold_answer'):
-                    gold_answer = str(node_data['gold_answer']).strip().lower()
-                    break
-
-        # Get the final consensus decision by finding the most recent decision
-        # that led to consensus (look for nodes from the last round)
-        max_round = -1
-        for node_id, node_data in graph.nodes(data=True):
-            if node_data.get('type') in ['response', 'initial_response']:
-                round_num = node_data.get('round', 0)
-                if round_num > max_round:
-                    max_round = round_num
-                    final_decision = node_data.get('decision', '').strip().lower()
-
-        # Determine if final consensus was correct
-        if final_decision and gold_answer:
-            is_consensus_correct = (final_decision == gold_answer)
-            consensus_results.append({
-                'question': question[:50] + '...',
-                'final_decision': final_decision,
-                'gold_answer': gold_answer,
-                'correct': is_consensus_correct
-            })
-
-    # Calculate final consensus accuracy
-    total_questions = len(consensus_results)
-    correct_consensus = sum(1 for result in consensus_results if result['correct'])
-    consensus_accuracy = correct_consensus / total_questions if total_questions > 0 else 0
-
-    print(f"Total questions processed: {total_questions}")
-    print(f"Correct final consensus decisions: {correct_consensus}")
-    print(f"Incorrect final consensus decisions: {total_questions - correct_consensus}")
-    print(f"MAS Final Consensus Accuracy: {consensus_accuracy:.1%} ({correct_consensus}/{total_questions})")
-
-    # Optional: Show breakdown per question
-    print("\nPer-Question Breakdown:")
-    for i, result in enumerate(consensus_results):
-        status = "✓" if result['correct'] else "✗"
-        print(f"Q{i + 1} {status}: '{result['question']}' → {result['final_decision']} (Gold: {result['gold_answer']})")
-
-    print("=" * 50)"""
 
     # Load the saved MAG dataset from the pickle file
-    # Load the saved MAG dataset from the pickle file
-    with open('data/mag_dataset.pkl', 'rb') as f:
+    with open('mag_dataset.pkl', 'rb') as f:
         mag_dataset = pickle.load(f)
+    
+    # Process dataset items
     for item in mag_dataset:
         graph = item["graph"]
         gold_answer = None
@@ -1186,145 +1226,51 @@ def main():
         item['final_decision'] = final_decision
         item['is_correct'] = (final_decision == gold_answer) if final_decision and gold_answer else False
 
-    print(mag_dataset[1])
-    # Initialize counters
+    # Filter dataset to keep only consensus examples
     round_counts = {"initial": 0, "round1": 0, "round2": 0, "no_consensus": 0}
-
-    for item in mag_dataset:
-        graph = item["graph"]
-        # Track the round where consensus was first reached
-        consensus_round = None
-
-        # Map round number to label
-        round_label = {0: "initial", 1: "round1", 2: "round2"}
-
-        # Find all agent roles
-        agent_roles = set(
-            node_data.get('role')
-            for node_id, node_data in graph.nodes(data=True)
-            if node_data.get('type') in ['response', 'initial_response']
-        )
-
-        # For each round, check if all agents agree
-        max_round = max(
-            (node_data.get('round', 0)
-             for node_id, node_data in graph.nodes(data=True)
-             if node_data.get('type') in ['response', 'initial_response']),
-            default=0
-        )
-        for r in range(max_round + 1):
-            # Collect decisions for this round
-            decisions = [
-                node_data.get('decision')
-                for node_id, node_data in graph.nodes(data=True)
-                if node_data.get('type') in ['response', 'initial_response'] and node_data.get('round', 0) == r
-            ]
-            # Only count if all agent roles are present
-            if len(decisions) == len(agent_roles) and len(set(decisions)) == 1:
-                consensus_round = r
-                break
-
-        if consensus_round is not None:
-            label = round_label.get(consensus_round, f"round{consensus_round}")
-            round_counts[label] += 1
-        else:
-            round_counts["no_consensus"] += 1
-
-    print(round_counts)
-
-    round_counts = {"initial": 0, "round1": 0, "round2": 0, "no_consensus": 0}
-
     filtered_mag_dataset = []
 
     for item in mag_dataset:
         graph = item["graph"]
         consensus_round = None
         round_label = {0: "initial", 1: "round1", 2: "round2"}
+        
         agent_roles = set(
             node_data.get('role')
             for node_id, node_data in graph.nodes(data=True)
             if node_data.get('type') in ['response', 'initial_response']
         )
+        
         max_round = max(
             (node_data.get('round', 0)
              for node_id, node_data in graph.nodes(data=True)
              if node_data.get('type') in ['response', 'initial_response']),
             default=0
         )
+        
         for r in range(max_round + 1):
             decisions = [
                 node_data.get('decision')
                 for node_id, node_data in graph.nodes(data=True)
                 if node_data.get('type') in ['response', 'initial_response'] and node_data.get('round', 0) == r
             ]
+            
             if len(decisions) == len(agent_roles) and len(set(decisions)) == 1:
                 consensus_round = r
                 break
+        
         if consensus_round is not None:
             filtered_mag_dataset.append(item)
-            if consensus_round in round_label:
-                label = round_label[consensus_round]
-            else:
-                label = "round" + str(consensus_round)
+            label = round_label.get(consensus_round, f"round{consensus_round}")
             round_counts[label] += 1
         else:
             round_counts["no_consensus"] += 1
-    mag_dataset = filtered_mag_dataset
-    print(round_counts)
-    print(f"Filtered dataset length: {len(filtered_mag_dataset)}")
-    print("\n=== Multi-Agent System (MAS) Final Consensus Accuracy ===")
 
-    # Extract final consensus decisions for each question
-    consensus_results = []
-    for item in mag_dataset:
-        question = item["question"]
-        graph = item["graph"]
+    print("Round distribution:", round_counts)
 
-        # Method 1: Check if any node represents final consensus
-        final_decision = None
-        gold_answer = None
-
-        # Look for consensus decision in graph nodes
-        for node_id, node_data in graph.nodes(data=True):
-            if node_data.get('type') in ['response', 'initial_response']:
-                # Get the decision and gold answer from any response node
-                if node_data.get('decision') and node_data.get('gold_answer'):
-                    gold_answer = str(node_data['gold_answer']).strip().lower()
-                    break
-
-        # Get the final consensus decision by finding the most recent decision
-        # that led to consensus (look for nodes from the last round)
-        max_round = -1
-        for node_id, node_data in graph.nodes(data=True):
-            if node_data.get('type') in ['response', 'initial_response']:
-                round_num = node_data.get('round', 0)
-                if round_num > max_round:
-                    max_round = round_num
-                    final_decision = node_data.get('decision', '').strip().lower()
-
-        # Determine if final consensus was correct
-        if final_decision and gold_answer:
-            is_consensus_correct = (final_decision == gold_answer)
-            consensus_results.append({
-                'question': question[:50] + '...',
-                'final_decision': final_decision,
-                'gold_answer': gold_answer,
-                'correct': is_consensus_correct
-            })
-
-    # Calculate final consensus accuracy
-    total_questions = len(consensus_results)
-    correct_consensus = sum(1 for result in consensus_results if result['correct'])
-    consensus_accuracy = correct_consensus / total_questions if total_questions > 0 else 0
-
-    print(f"Total questions processed: {total_questions}")
-    print(f"Correct final consensus decisions: {correct_consensus}")
-    print(f"Incorrect final consensus decisions: {total_questions - correct_consensus}")
-    print(f"MAS Final Consensus Accuracy: {consensus_accuracy:.1%} ({correct_consensus}/{total_questions})")
-
-    # Remove initial round consensus examples - they lack multi-round debate structure
+    # Remove initial round consensus examples
     filtered_by_rounds = []
-    for item in mag_dataset:
+    for item in filtered_mag_dataset:
         graph = item["graph"]
         max_round = max(
             (node_data.get('round', 0)
@@ -1332,34 +1278,30 @@ def main():
              if node_data.get('type') in ['response', 'initial_response']),
             default=0
         )
-        # Only keep examples that went beyond initial round
         if max_round > 0:
             filtered_by_rounds.append(item)
 
     mag_dataset = filtered_by_rounds
-    print(f"After removing initial consensus: {len(mag_dataset)} examples")
-    print("\n=== Multi-Agent System (MAS) Final Consensus Accuracy ===")
+    print(f"After filtering: {len(mag_dataset)} examples")
 
-    # Extract final consensus decisions for each question
+    # Calculate MAS Consensus Accuracy
+    print("\n=== Multi-Agent System (MAS) Final Consensus Accuracy ===")
     consensus_results = []
+    
     for item in mag_dataset:
         question = item["question"]
         graph = item["graph"]
-
-        # Method 1: Check if any node represents final consensus
         final_decision = None
         gold_answer = None
 
         # Look for consensus decision in graph nodes
         for node_id, node_data in graph.nodes(data=True):
             if node_data.get('type') in ['response', 'initial_response']:
-                # Get the decision and gold answer from any response node
                 if node_data.get('decision') and node_data.get('gold_answer'):
                     gold_answer = str(node_data['gold_answer']).strip().lower()
                     break
 
         # Get the final consensus decision by finding the most recent decision
-        # that led to consensus (look for nodes from the last round)
         max_round = -1
         for node_id, node_data in graph.nodes(data=True):
             if node_data.get('type') in ['response', 'initial_response']:
@@ -1389,7 +1331,7 @@ def main():
     print(f"MAS Final Consensus Accuracy: {consensus_accuracy:.1%} ({correct_consensus}/{total_questions})")
 
     # Initialize tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.decomposer_model)
+    tokenizer = AutoTokenizer.from_pretrained(DECOMPOSER_MODEL)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -1400,13 +1342,17 @@ def main():
     # Prepare positive and negative examples for contrastive learning
     print("Preparing examples for contrastive learning")
     pos_examples, neg_examples = prepare_pos_neg_examples(mag_dataset, tokenizer)
+    # Add this to your main() function after preparing examples:
+    print("🔧 Validating and fixing examples...")
+    pos_examples, neg_examples = validate_and_fix_examples(pos_examples, neg_examples, tokenizer)
+
 
     # Extract PyG graphs
     pyg_graphs = [item["pyg_data"] for item in mag_dataset]
-    print(len(decomposer_examples))
-    print(len(solver_examples))
-    print(len(pos_examples))
-    print(len(neg_examples))
+    print(f"Decomposer examples: {len(decomposer_examples)}")
+    print(f"Solver examples: {len(solver_examples)}")
+    print(f"Positive examples: {len(pos_examples)}")
+    print(f"Negative examples: {len(neg_examples)}")
 
     # Create dataset
     examples = []
@@ -1420,37 +1366,43 @@ def main():
             "graph": pyg_graphs[i]
         })
     dataset = MAGDiDataset(examples)
+    print(f"Final dataset size: {len(dataset)}")
 
-    # Initialize model (no LoRA)
+    # Initialize model
     print("Initializing SocraticMAGDi model")
     model = SocraticMAGDi(
-        decomposer_name=args.decomposer_model,
-        solver_name=args.solver_model,
-        gcn_in_channels=args.gcn_in_channels,
-        gcn_hidden_channels=args.gcn_hidden_channels,
-        gcn_out_channels=args.gcn_out_channels,
-        alpha=args.alpha,
-        beta=args.beta,
-        gamma=args.gamma,
-        delta=args.delta
+        decomposer_name=DECOMPOSER_MODEL,
+        solver_name=SOLVER_MODEL,
+        gcn_in_channels=GCN_IN_CHANNELS,
+        gcn_hidden_channels=GCN_HIDDEN_CHANNELS,
+        gcn_out_channels=GCN_OUT_CHANNELS,
+        alpha=ALPHA,
+        beta=BETA,
+        gamma=GAMMA,
+        delta=DELTA
     )
 
     # Initialize trainer
+    # In your main() function, change training args to:
     training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_epochs,
-        per_device_train_batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        weight_decay=0.01,
-        logging_dir=f"{args.output_dir}/logs",
-        logging_steps=10,
-        save_strategy="epoch",
-        save_total_limit=2,
-        remove_unused_columns=False,
-        fp16=True,
-        report_to="tensorboard",
-        max_grad_norm = 1.0,  # Add gradient clipping
+    output_dir=OUTPUT_DIR,
+    num_train_epochs=5,                    # Reduce epochs
+    per_device_train_batch_size=1,         # Reduce to 1
+    gradient_accumulation_steps=4,          # Simulate batch size 4
+    learning_rate=1e-7,                    # Very conservative LR
+    weight_decay=0.0,                      
+    max_grad_norm=0.1,                     
+    logging_steps=1,                       
+    save_strategy="no",                    
+    warmup_steps=0,                        
+    lr_scheduler_type="constant",
+    save_safetensors=False,
+    dataloader_pin_memory=False,
+    fp16=False,                            # DISABLE FP16
+    gradient_checkpointing=False,           # Enable for memory
+    dataloader_num_workers=0,              # Disable multiprocessing
     )
+
 
     trainer = SocraticMAGDiTrainer(
         model=model,
@@ -1463,28 +1415,26 @@ def main():
     print("Training SocraticMAGDi model")
     trainer.train()
 
-    # Enhanced model saving for proper retrieval
-    print(f"Saving complete model to {args.output_dir}/final")
-
-    # Create final directory
-    final_dir = f"{args.output_dir}/final"
+    # Enhanced model saving
+    print(f"Saving complete model to {OUTPUT_DIR}/final")
+    final_dir = f"{OUTPUT_DIR}/final"
     os.makedirs(final_dir, exist_ok=True)
 
     # Save the complete model state dict
     model_state_dict = model.state_dict()
     torch.save(model_state_dict, os.path.join(final_dir, "pytorch_model.bin"))
 
-    # Save model configuration for reconstruction (no LoRA info)
+    # Save model configuration
     model_config = {
-        "decomposer_name": args.decomposer_model,
-        "solver_name": args.solver_model,
-        "gcn_in_channels": args.gcn_in_channels,
-        "gcn_hidden_channels": args.gcn_hidden_channels,
-        "gcn_out_channels": args.gcn_out_channels,
-        "alpha": args.alpha,
-        "beta": args.beta,
-        "gamma": args.gamma,
-        "delta": args.delta,
+        "decomposer_name": DECOMPOSER_MODEL,
+        "solver_name": SOLVER_MODEL,
+        "gcn_in_channels": GCN_IN_CHANNELS,
+        "gcn_hidden_channels": GCN_HIDDEN_CHANNELS,
+        "gcn_out_channels": GCN_OUT_CHANNELS,
+        "alpha": ALPHA,
+        "beta": BETA,
+        "gamma": GAMMA,
+        "delta": DELTA,
         "model_type": "SocraticMAGDi",
         "torch_dtype": "float32",
         "transformers_version": "4.36.0"
@@ -1493,15 +1443,15 @@ def main():
     with open(os.path.join(final_dir, "config.json"), "w") as f:
         json.dump(model_config, f, indent=2)
 
-    # Save tokenizer with proper configuration
+    # Save tokenizer
     tokenizer.save_pretrained(final_dir)
 
-    # Save training metadata (no LoRA info)
+    # Save training metadata
     training_metadata = {
         "training_args": {
-            "num_epochs": args.num_epochs,
-            "batch_size": args.batch_size,
-            "learning_rate": args.learning_rate,
+            "num_epochs": NUM_EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "learning_rate": LEARNING_RATE,
             "use_lora": False
         },
         "dataset_info": {
@@ -1514,7 +1464,7 @@ def main():
     with open(os.path.join(final_dir, "training_info.json"), "w") as f:
         json.dump(training_metadata, f, indent=2)
 
-    # Additional safety: Save individual component states (simplified, no LoRA)
+    # Save individual component states
     components_dir = os.path.join(final_dir, "components")
     os.makedirs(components_dir, exist_ok=True)
 
@@ -1535,9 +1485,9 @@ def main():
     # Save GCN component
     gcn_state = {
         "model_state_dict": model.gcn.state_dict(),
-        "in_channels": args.gcn_in_channels,
-        "hidden_channels": args.gcn_hidden_channels,
-        "out_channels": args.gcn_out_channels
+        "in_channels": GCN_IN_CHANNELS,
+        "hidden_channels": GCN_HIDDEN_CHANNELS,
+        "out_channels": GCN_OUT_CHANNELS
     }
     torch.save(gcn_state, os.path.join(components_dir, "gcn.bin"))
 
@@ -1546,9 +1496,11 @@ def main():
     print(f"Config: {os.path.join(final_dir, 'config.json')}")
     print(f"Tokenizer: {final_dir}")
     print(f"Components: {components_dir}")
-
     print("Training complete!")
 
+    return model, tokenizer, final_dir
 
+# Run the training
 if __name__ == "__main__":
-    main()
+    model, tokenizer, model_path = main()
+    print(f"Final model saved at: {model_path}")
