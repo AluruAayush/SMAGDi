@@ -1,7 +1,6 @@
 import os
 import json
 import torch
-import argparse
 import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -9,8 +8,7 @@ from datasets import load_dataset
 import time
 
 # Import the unified model
-from smodel import SocraticMAGDi
-
+#from smodel import SocraticMAGDi
 
 def extract_answer(dataset_type, text):
     """Extract answer from generated text based on dataset format."""
@@ -141,12 +139,22 @@ def load_model_from_config(model_path):
     return model, model_config
 
 
-def socratic_inference_unified(question, model, tokenizer, args):
-    """Perform inference using the unified SocraticMAGDi model."""
+def socratic_inference_unified(question, model, tokenizer, max_new_tokens, temperature, num_beams, do_sample, dataset_type, example_num=None):
+    """Perform inference using the unified SocraticMAGDi model with detailed printing."""
     device = next(model.parameters()).device
+    
+    # Print the original question
+    print(f"\n{'='*80}")
+    if example_num:
+        print(f"🔍 EXAMPLE {example_num}")
+    print(f"📝 ORIGINAL QUESTION:")
+    print(f"   {question}")
+    print(f"{'='*80}")
 
     # Step 1: Use decomposer to break down the question
+    print(f"🧩 STEP 1: DECOMPOSER - Breaking down the question...")
     decomposer_prompt = f"Question: {question}\nBreak this down into sub-questions:"
+    print(f"📤 Decomposer Prompt: {decomposer_prompt}")
 
     decomposer_inputs = tokenizer(
         decomposer_prompt,
@@ -160,10 +168,10 @@ def socratic_inference_unified(question, model, tokenizer, args):
     with torch.no_grad():
         decomposer_outputs = model.decomposer.model.generate(
             **decomposer_inputs,
-            max_new_tokens=args.max_new_tokens // 2,
-            temperature=args.temperature,
-            num_beams=args.num_beams,
-            do_sample=args.do_sample,
+            max_new_tokens=max_new_tokens // 2,
+            temperature=temperature,
+            num_beams=num_beams,
+            do_sample=do_sample,
             pad_token_id=tokenizer.eos_token_id
         )
 
@@ -171,6 +179,9 @@ def socratic_inference_unified(question, model, tokenizer, args):
         decomposer_outputs[0][decomposer_inputs.input_ids.shape[1]:],
         skip_special_tokens=True
     )
+    
+    print(f"📥 Decomposer Raw Output:")
+    print(f"   {sub_questions_text}")
 
     # Extract sub-questions
     sub_questions = []
@@ -188,10 +199,19 @@ def socratic_inference_unified(question, model, tokenizer, args):
             "What approach should I use to solve this problem?"
         ]
 
+    print(f"🔗 EXTRACTED SUB-QUESTIONS ({len(sub_questions)}):")
+    for i, sq in enumerate(sub_questions, 1):
+        print(f"   {i}. {sq}")
+
     # Step 2: Use solver to answer each sub-question
+    print(f"\n🔧 STEP 2: SOLVER - Answering each sub-question...")
     sub_answers = []
-    for sub_q in sub_questions:
+    for i, sub_q in enumerate(sub_questions, 1):
+        print(f"\n--- Sub-question {i}/{len(sub_questions)} ---")
+        print(f"❓ Question: {sub_q}")
+        
         solver_prompt = f"Question: {sub_q}\nContext: {question}\nAnswer:"
+        print(f"📤 Solver Prompt: {solver_prompt}")
 
         solver_inputs = tokenizer(
             solver_prompt,
@@ -204,10 +224,10 @@ def socratic_inference_unified(question, model, tokenizer, args):
         with torch.no_grad():
             solver_outputs = model.solver.model.generate(
                 **solver_inputs,
-                max_new_tokens=args.max_new_tokens // len(sub_questions),
-                temperature=args.temperature,
-                num_beams=args.num_beams,
-                do_sample=args.do_sample,
+                max_new_tokens=max_new_tokens // len(sub_questions),
+                temperature=temperature,
+                num_beams=num_beams,
+                do_sample=do_sample,
                 pad_token_id=tokenizer.eos_token_id
             )
 
@@ -216,13 +236,18 @@ def socratic_inference_unified(question, model, tokenizer, args):
             skip_special_tokens=True
         )
 
+        print(f"💡 Answer: {sub_answer}")
         sub_answers.append(sub_answer)
 
     # Step 3: Use solver to combine sub-answers for final answer
+    print(f"\n🎯 STEP 3: FINAL SYNTHESIS - Combining sub-answers...")
     combined_prompt = f"Question: {question}\n\n"
     for i, (sub_q, sub_a) in enumerate(zip(sub_questions, sub_answers)):
         combined_prompt += f"Sub-question {i + 1}: {sub_q}\nAnswer: {sub_a}\n\n"
     combined_prompt += "Based on the above sub-questions and answers, what is the final answer to the original question?"
+
+    print(f"📤 Final Synthesis Prompt:")
+    print(f"{combined_prompt}")
 
     solver_inputs = tokenizer(
         combined_prompt,
@@ -235,10 +260,10 @@ def socratic_inference_unified(question, model, tokenizer, args):
     with torch.no_grad():
         solver_outputs = model.solver.model.generate(
             **solver_inputs,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            num_beams=args.num_beams,
-            do_sample=args.do_sample,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            num_beams=num_beams,
+            do_sample=do_sample,
             pad_token_id=tokenizer.eos_token_id
         )
 
@@ -247,69 +272,66 @@ def socratic_inference_unified(question, model, tokenizer, args):
         skip_special_tokens=True
     )
 
+    extracted_answer = extract_answer(dataset_type, final_answer)
+    
+    print(f"📥 Final Raw Answer:")
+    print(f"   {final_answer}")
+    print(f"🎯 EXTRACTED FINAL ANSWER: {extracted_answer}")
+    print(f"{'='*80}\n")
+
     return {
         "sub_questions": sub_questions,
         "sub_answers": sub_answers,
         "final_answer": final_answer,
-        "extracted_answer": extract_answer(args.dataset_type, final_answer)
+        "extracted_answer": extracted_answer
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test a trained SocraticMAGDi model")
+    # Configuration Variables (no argparse - direct variables)
+    MODEL_PATH = "outputs/final"  # Path to your trained model
+    DATASET_TYPE = "boolean"  # Type of dataset for answer extraction
+    TEST_FILE = None  # Path to test file (optional)
+    OUTPUT_FILE = "results.json"  # Path to output file
+    BATCH_SIZE = 4  # Batch size for inference
+    MAX_NEW_TOKENS = 512  # Maximum number of new tokens to generate
+    TEMPERATURE = 0.7  # Temperature for generation
+    NUM_BEAMS = 1  # Number of beams for beam search
+    DO_SAMPLE = True  # Whether to use sampling for generation
+    MAX_EXAMPLES = 10  # Maximum number of examples to process (set to None for all)
 
-    # Model configuration - now expects unified model path
-    parser.add_argument("--model_path", type=str, required=True,
-                        help="Path to trained SocraticMAGDi model directory")
-
-    # Testing configuration
-    parser.add_argument("--dataset_type", type=str, default="boolean",
-                        choices=["multiple_choice", "numerical", "math", "classification", "text", "boolean",
-                                 "strategy-qa"],
-                        help="Type of dataset for answer extraction")
-    parser.add_argument("--test_file", type=str, default=None,
-                        help="Path to test file (optional)")
-    parser.add_argument("--output_file", type=str, default="results.json",
-                        help="Path to output file")
-    parser.add_argument("--batch_size", type=int, default=4,
-                        help="Batch size for inference")
-    parser.add_argument("--max_new_tokens", type=int, default=512,
-                        help="Maximum number of new tokens to generate")
-    parser.add_argument("--temperature", type=float, default=0.7,
-                        help="Temperature for generation")
-    parser.add_argument("--num_beams", type=int, default=1,
-                        help="Number of beams for beam search")
-    parser.add_argument("--do_sample", action="store_true",
-                        help="Whether to use sampling for generation")
-
-    args = parser.parse_args()
+    print(f"Starting inference with model from: {MODEL_PATH}")
 
     # Load test data
     test_data = load_dataset("wics/strategy-qa", split="test")
     test_data = test_data.train_test_split(test_size=0.20, seed=42)
     test_data = test_data["test"]
+    
+    # Limit examples if specified
+    if MAX_EXAMPLES:
+        test_data = test_data.select(range(min(MAX_EXAMPLES, len(test_data))))
+    
+    print(f"Processing {len(test_data)} examples")
 
     # Load the unified trained model using saved configuration
-    print(f"Loading SocraticMAGDi model from {args.model_path}")
+    print(f"Loading SocraticMAGDi model from {MODEL_PATH}")
 
     try:
-        model, model_config = load_model_from_config(args.model_path)
+        model, model_config = load_model_from_config(MODEL_PATH)
         print("Successfully loaded model with saved configuration")
 
         # Print loaded configuration for verification
         print(f"Model configuration:")
         print(f"  Decomposer: {model_config['decomposer_name']}")
         print(f"  Solver: {model_config['solver_name']}")
-        print(
-            f"  GCN dimensions: {model_config['gcn_in_channels']} -> {model_config['gcn_hidden_channels']} -> {model_config['gcn_out_channels']}")
-        print(
-            f"  Loss weights: α={model_config['alpha']}, β={model_config['beta']}, γ={model_config['gamma']}, δ={model_config['delta']}")
+        print(f"  GCN dimensions: {model_config['gcn_in_channels']} -> {model_config['gcn_hidden_channels']} -> {model_config['gcn_out_channels']}")
+        print(f"  Loss weights: α={model_config['alpha']}, β={model_config['beta']}, γ={model_config['gamma']}, δ={model_config['delta']}")
 
     except Exception as e:
         print(f"Error: Failed to load model from config: {e}")
         print("Falling back to default configuration")
 
-        # Fallback to default configuration
+        # Fallback to default configuration (matching your training setup)
         model = SocraticMAGDi(
             decomposer_name="Qwen/Qwen2-1.5B",
             solver_name="Qwen/Qwen2-1.5B",
@@ -323,13 +345,30 @@ def main():
         )
 
         # Try to load weights anyway
-        model_state_path = os.path.join(args.model_path, "pytorch_model.bin")
+        model_state_path = os.path.join(MODEL_PATH, "pytorch_model.bin")
         if os.path.exists(model_state_path):
             model.load_state_dict(torch.load(model_state_path, map_location="cpu"), strict=False)
             print("Loaded model weights with default configuration")
+        
+        model_config = {
+            "decomposer_name": "Qwen/Qwen2-1.5B",
+            "solver_name": "Qwen/Qwen2-1.5B",
+            "gcn_in_channels": 768,
+            "gcn_hidden_channels": 256,
+            "gcn_out_channels": 4,
+            "alpha": 1.0,
+            "beta": 1.0,
+            "gamma": 0.1,
+            "delta": 0.5
+        }
 
     # Load tokenizer from the model path (saved by training script)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    except:
+        # Fallback to loading from model name if path doesn't work
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-1.5B")
+    
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -337,28 +376,40 @@ def main():
     model.eval()
 
     # Process test examples
-    print("Processing test examples")
+    print("Processing test examples with detailed output...")
     results = []
     predictions = []
     references = []
     per_example_times = []
 
-    for example in tqdm(test_data, desc="Inferencing"):
+    for idx, example in enumerate(test_data):
         question = example["question"]
         reference = example["answer"]  # StrategyQA uses "answer" field
 
-        # Perform Socratic inference using unified model
+        # Perform Socratic inference using unified model with detailed printing
         start = time.time()
         result = socratic_inference_unified(
             question,
             model,
             tokenizer,
-            args
+            MAX_NEW_TOKENS,
+            TEMPERATURE,
+            NUM_BEAMS,
+            DO_SAMPLE,
+            DATASET_TYPE,
+            example_num=idx + 1
         )
         elapsed = time.time() - start
         per_example_times.append(elapsed)
 
         result["time_taken"] = elapsed
+
+        # Print comparison with ground truth
+        is_correct = "✅ CORRECT" if str(result["extracted_answer"]).lower().strip() == str(reference).lower().strip() else "❌ WRONG"
+        print(f"🏆 GROUND TRUTH: {reference}")
+        print(f"🎯 MODEL PREDICTION: {result['extracted_answer']}")
+        print(f"📊 RESULT: {is_correct}")
+        print(f"⏱️  TIME TAKEN: {elapsed:.2f}s")
 
         results.append({
             "question": question,
@@ -367,7 +418,8 @@ def main():
             "sub_questions": result["sub_questions"],
             "sub_answers": result["sub_answers"],
             "final_answer": result["final_answer"],
-            "time_taken": elapsed
+            "time_taken": elapsed,
+            "is_correct": is_correct == "✅ CORRECT"
         })
 
         predictions.append(result["extracted_answer"])
@@ -377,12 +429,17 @@ def main():
     avg_time = total_time / len(per_example_times)
 
     # Calculate accuracy
-    accuracy = evaluate_accuracy(args.dataset_type, predictions, references)
-    print(f"Overall accuracy: {accuracy:.4f}")
-    print(f"Avg time per example: {avg_time:.3f}s")
+    accuracy = evaluate_accuracy(DATASET_TYPE, predictions, references)
+    
+    print(f"\n{'='*50}")
+    print(f"🎊 FINAL RESULTS SUMMARY")
+    print(f"{'='*50}")
+    print(f"📊 Overall accuracy: {accuracy:.4f} ({accuracy*100:.1f}%)")
+    print(f"⏱️  Avg time per example: {avg_time:.3f}s")
+    print(f"🚀 Efficiency (acc/sec): {accuracy/avg_time:.4f}")
+    print(f"✅ Correct predictions: {sum(predictions[i] == references[i] for i in range(len(predictions)))}/{len(predictions)}")
 
     eff = accuracy / avg_time
-    print(f"Efficiency (acc/sec): {eff:.4f}")
 
     # Save results
     output = {
@@ -390,30 +447,27 @@ def main():
         "accuracy": accuracy,
         "avg_time": avg_time,
         "efficiency": eff,
+        "total_examples": len(results),
         "metadata": {
-            "model_path": args.model_path,
-            "dataset_type": args.dataset_type,
-            "temperature": args.temperature,
-            "num_beams": args.num_beams,
-            "do_sample": args.do_sample,
-            "model_config": model_config if 'model_config' in locals() else None
+            "model_path": MODEL_PATH,
+            "dataset_type": DATASET_TYPE,
+            "temperature": TEMPERATURE,
+            "num_beams": NUM_BEAMS,
+            "do_sample": DO_SAMPLE,
+            "model_config": model_config
         }
     }
 
-    with open(args.output_file, "w") as f:
+    with open(OUTPUT_FILE, "w") as f:
         json.dump(output, f, indent=2)
 
-    print(f"Results saved to {args.output_file}")
+    print(f"💾 Results saved to {OUTPUT_FILE}")
 
-    # Print examples of predictions
-    print("\nExample predictions:")
-    for i in range(min(5, len(results))):
-        print(f"Question: {results[i]['question']}")
-        print(f"Sub-questions: {results[i]['sub_questions']}")
-        print(f"Final answer: {results[i]['final_answer']}")
-        print(f"Prediction: {results[i]['prediction']}")
-        print(f"Reference: {results[i]['reference']}")
-        print("---")
+    # Print summary of correct vs incorrect predictions
+    print(f"\n📈 PREDICTION BREAKDOWN:")
+    correct_count = sum(1 for r in results if r["is_correct"])
+    print(f"✅ Correct: {correct_count}")
+    print(f"❌ Incorrect: {len(results) - correct_count}")
 
 
 if __name__ == "__main__":
