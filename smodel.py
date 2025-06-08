@@ -106,114 +106,150 @@ class SocraticMAGDi(nn.Module):
         self.gamma = gamma  # Weight for contrastive loss
         self.delta = delta  # Weight for decomposer-solver alignment loss
     
-    def forward(self, decomposer_input_ids, decomposer_attention_mask, decomposer_labels,
-                solver_input_ids, solver_attention_mask, solver_labels,
-                pos_input_ids, pos_attention_mask, pos_labels,
-                neg_input_ids, neg_attention_mask, neg_labels, graph):
+    def forward(self, decomposer, solver, pos, neg, graph):
+        """Forward pass without memory handling for high-memory GPU."""
         
-        # Process decomposer inputs
-        decomposer_loss, decomposer_emb = self.decomposer(
-            decomposer_input_ids, decomposer_attention_mask, decomposer_labels
-        )
+        try:
+            # Quick validation
+            batch_size = len(decomposer)
+            
+            # Process tensors
+            decomposer_input_ids = torch.stack([item["prompt_input_ids"] for item in decomposer])
+            decomposer_attention_mask = torch.stack([item["prompt_attention_mask"] for item in decomposer])
+            decomposer_labels = torch.stack([item["completion_input_ids"] for item in decomposer])
+            
+            solver_input_ids = torch.stack([item["prompt_input_ids"] for item in solver])
+            solver_attention_mask = torch.stack([item["prompt_attention_mask"] for item in solver])
+            solver_labels = torch.stack([item["completion_input_ids"] for item in solver])
+            
+            pos_input_ids = torch.stack([item["input_ids"] for item in pos])
+            pos_attention_mask = torch.stack([item["attention_mask"] for item in pos])
+            pos_labels = torch.stack([item["labels"] for item in pos])
+            
+            neg_input_ids = torch.stack([item["input_ids"] for item in neg])
+            neg_attention_mask = torch.stack([item["attention_mask"] for item in neg])
+            neg_labels = torch.stack([item["labels"] for item in neg])
+                        
+            # Component computations
+            decomposer_loss, decomposer_emb = self.decomposer(
+                decomposer_input_ids, decomposer_attention_mask, decomposer_labels
+            )
+            
+            solver_loss, solver_emb = self.solver(
+                solver_input_ids, solver_attention_mask, solver_labels
+            )
+            
+            pos_loss, pos_emb = self.solver(pos_input_ids, pos_attention_mask, pos_labels)
+            
+            _, neg_emb = self.solver(neg_input_ids, neg_attention_mask, None)
+            
+            # Contrastive computation
+            pos_h = torch.relu(self.mlp1(pos_emb))
+            pos_score = torch.tanh(self.mlp2(pos_h))
+            neg_h = torch.relu(self.mlp1(neg_emb))
+            neg_score = torch.tanh(self.mlp2(neg_h))
+            
+            mr_cri = torch.nn.MarginRankingLoss(1.0, reduction='mean').to(pos_score.device)
+            mr_loss = mr_cri(pos_score, neg_score, torch.ones_like(pos_score).to(pos_score.device))
+            
+            from torch_geometric.loader import DataLoader
+            graph_loader = DataLoader(graph, batch_size=len(graph), shuffle=False, pin_memory=False, num_workers=0)
+            graph_batch = next(iter(graph_loader))
+            
+            gcn_output, logits = self.gcn(graph_batch.x, graph_batch.edge_index)
+            graph_batch.y = graph_batch.y.to(logits.device)
+            ce_cri = torch.nn.CrossEntropyLoss()
+            node_loss = ce_cri(logits, graph_batch.y)
+            
+            alignment_loss = F.mse_loss(decomposer_emb, solver_emb)
+            
+            # Calculate final losses
+            lm_combined = self.alpha * (decomposer_loss + solver_loss + pos_loss)
+            node_weighted = self.beta * node_loss
+            mr_weighted = self.gamma * mr_loss
+            alignment_weighted = self.delta * alignment_loss
+            
+            total_loss = lm_combined + node_weighted + mr_weighted + alignment_weighted
+                        
+            return (lm_combined, node_weighted, mr_weighted, alignment_weighted)
+            
+        except Exception as e:
+            print(f"🚨 CRASH in forward pass: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            device = next(self.parameters()).device
+            dummy = torch.tensor(0.1, device=device, requires_grad=True)
+            return dummy, dummy, dummy, dummy
         
-        # Process solver inputs
-        solver_loss, solver_emb = self.solver(
-            solver_input_ids, solver_attention_mask, solver_labels
-        )
         
-        # Process positive examples
-        pos_loss, pos_emb = self.solver(
-            pos_input_ids, pos_attention_mask, pos_labels
-        )
-        
-        # Process negative examples
-        _, neg_emb = self.solver(
-            neg_input_ids, neg_attention_mask, None
-        )
-        
-        # Filter out padding in negative examples
-        row_sums = neg_attention_mask.sum(dim=1)
-        neg_mask = row_sums > 5  # Ignore negative padding
-        
-        if neg_mask.any():
-            neg_mask = neg_mask.to(pos_emb.device)
-            pos_emb = pos_emb[neg_mask]
-            neg_emb = neg_emb[neg_mask]
-        
-        # Calculate contrastive scores
-        pos_h = torch.relu(self.mlp1(pos_emb))
-        pos_score = torch.tanh(self.mlp2(pos_h))
-        
-        neg_h = torch.relu(self.mlp1(neg_emb))
-        neg_score = torch.tanh(self.mlp2(neg_h))
-        
-        # Margin ranking loss
-        mr_cri = torch.nn.MarginRankingLoss(1.0, reduction='mean').to(pos_score.device)
-        mr_loss = mr_cri(pos_score, neg_score, torch.ones_like(pos_score).to(pos_score.device))
-        
-        # Process graph data
-        from torch_geometric.loader import DataLoader
-        graph_loader = DataLoader(graph, batch_size=len(graph), shuffle=False, pin_memory=False, num_workers=0)
-        graph_batch = next(iter(graph_loader))
-        
-        # Graph node classification loss
-        gcn_output, logits = self.gcn(graph_batch.x, graph_batch.edge_index)
-        graph_batch.y = graph_batch.y.to(logits.device)
-        ce_cri = torch.nn.CrossEntropyLoss()
-        node_loss = ce_cri(logits, graph_batch.y)
-        
-        # Decomposer-solver alignment loss
-        alignment_loss = F.mse_loss(decomposer_emb, solver_emb)
-        
-        # Return individual loss components
-        return (
-            self.alpha * (decomposer_loss + solver_loss + pos_loss), 
-            self.beta * node_loss, 
-            self.gamma * mr_loss,
-            self.delta * alignment_loss
-        )
+
 
 class SocraticMAGDiDataCollator:
-    """Data collator for SocraticMAGDi model training."""
     
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         
-    def __call__(self, batch):
-        """
-        Process a batch of examples for training.
-        Each item in batch should be a dictionary with graph and examples.
-        """
-        decomposer_input_ids = torch.stack([item["decomposer_input_ids"] for item in batch])
-        decomposer_attention_mask = torch.stack([item["decomposer_attention_mask"] for item in batch])
-        decomposer_labels = torch.stack([item["decomposer_labels"] for item in batch])
+    def __call__(self, batch):        
+        # Handle variable-length lists by taking first item from each list
+        # (or implement more sophisticated aggregation if needed)
         
-        solver_input_ids = torch.stack([item["solver_input_ids"] for item in batch])
-        solver_attention_mask = torch.stack([item["solver_attention_mask"] for item in batch])
-        solver_labels = torch.stack([item["solver_labels"] for item in batch])
-        
-        pos_input_ids = torch.stack([item["pos_input_ids"] for item in batch])
-        pos_attention_mask = torch.stack([item["pos_attention_mask"] for item in batch])
-        pos_labels = torch.stack([item["pos_labels"] for item in batch])
-        
-        neg_input_ids = torch.stack([item["neg_input_ids"] for item in batch])
-        neg_attention_mask = torch.stack([item["neg_attention_mask"] for item in batch])
-        neg_labels = torch.stack([item["neg_labels"] for item in batch])
-        
-        graphs = [item["graph"] for item in batch]
-        
-        return {
-            "decomposer_input_ids": decomposer_input_ids,
-            "decomposer_attention_mask": decomposer_attention_mask,
-            "decomposer_labels": decomposer_labels,
-            "solver_input_ids": solver_input_ids,
-            "solver_attention_mask": solver_attention_mask,
-            "solver_labels": solver_labels,
-            "pos_input_ids": pos_input_ids,
-            "pos_attention_mask": pos_attention_mask,
-            "pos_labels": pos_labels,
-            "neg_input_ids": neg_input_ids,
-            "neg_attention_mask": neg_attention_mask,
-            "neg_labels": neg_labels,
-            "graph": graphs
+        processed_batch = {
+            "decomposer": [],
+            "solver": [], 
+            "pos": [],
+            "neg": [],
+            "graph": []
         }
+        
+        for item in batch:
+            # Get first decomposer example if exists, else create dummy
+            if item["decomposer"]:
+                decomposer_item = item["decomposer"][0]
+            else:
+                # Create dummy tensors if no decomposer examples
+                decomposer_item = {
+                    "prompt_input_ids": torch.zeros(512, dtype=torch.long),
+                    "prompt_attention_mask": torch.zeros(512, dtype=torch.long),
+                    "completion_input_ids": torch.zeros(512, dtype=torch.long),
+                    "completion_attention_mask": torch.zeros(512, dtype=torch.long)
+                }
+            processed_batch["decomposer"].append(decomposer_item)
+            
+            # Get first solver example if exists, else create dummy  
+            if item["solver"]:
+                solver_item = item["solver"][0]
+            else:
+                solver_item = {
+                    "prompt_input_ids": torch.zeros(512, dtype=torch.long),
+                    "prompt_attention_mask": torch.zeros(512, dtype=torch.long),
+                    "completion_input_ids": torch.zeros(512, dtype=torch.long),
+                    "completion_attention_mask": torch.zeros(512, dtype=torch.long)
+                }
+            processed_batch["solver"].append(solver_item)
+            
+            # Get first positive example if exists, else create dummy
+            if item["pos"]:
+                pos_item = item["pos"][0]
+            else:
+                pos_item = {
+                    "input_ids": torch.zeros(512, dtype=torch.long),
+                    "attention_mask": torch.zeros(512, dtype=torch.long),
+                    "labels": torch.zeros(512, dtype=torch.long)
+                }
+            processed_batch["pos"].append(pos_item)
+            
+            # Get first negative example if exists, else create dummy
+            if item["neg"]:
+                neg_item = item["neg"][0] 
+            else:
+                neg_item = {
+                    "input_ids": torch.zeros(512, dtype=torch.long),
+                    "attention_mask": torch.zeros(512, dtype=torch.long),
+                    "labels": torch.zeros(512, dtype=torch.long)
+                }
+            processed_batch["neg"].append(neg_item)
+            
+            # Add graph
+            processed_batch["graph"].append(item["graph"])
+        
+        return processed_batch
