@@ -78,3 +78,35 @@ class VanillaCoTMAGDi(nn.Module):
         total_loss = self.alpha * lm_loss + self.beta * node_loss + self.gamma * contrastive_loss
         
         return total_loss, (lm_loss, node_loss, contrastive_loss)
+
+class VanillaCoTMAGDiDataCollator:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def __call__(self, batch):
+        input_ids = torch.stack([item["input_ids"] for item in batch])
+        attention_mask = torch.stack([item["attention_mask"] for item in batch])
+        labels = torch.stack([item["labels"] for item in batch])
+
+        pos_input_ids = torch.stack([item["pos_input_ids"] for item in batch])
+        pos_attention_mask = torch.stack([item["pos_attention_mask"] for item in batch])
+        pos_labels = torch.stack([item["pos_labels"] for item in batch])
+
+        neg_input_ids = torch.stack([item["neg_input_ids"] for item in batch])
+        neg_attention_mask = torch.stack([item["neg_attention_mask"] for item in batch])
+        neg_labels = torch.stack([item["neg_labels"] for item in batch])
+
+        graphs = [item["graph"] for item in batch]
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+            "pos_input_ids": pos_input_ids,
+            "pos_attention_mask": pos_attention_mask,
+            "pos_labels": pos_labels,
+            "neg_input_ids": neg_input_ids,
+            "neg_attention_mask": neg_attention_mask,
+            "neg_labels": neg_labels,
+            "graph": graphs
+        }
