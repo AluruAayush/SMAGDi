@@ -3,20 +3,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, Linear
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from torch.nn.utils.rnn import pad_sequence
 
+# In GCN class in smodel.py [1]
 class GCN(torch.nn.Module):
-    """Graph Convolutional Network for processing multi-agent interaction graphs."""
-    
     def __init__(self, dim_in, dim_h, dim_out):
         super().__init__()
         self.gcn1 = GCNConv(dim_in, dim_h)
         self.gcn2 = GCNConv(dim_h, dim_out)
-    
+        # Add a linear projection for the residual connection if dimensions differ
+        self.residual_proj = None
+        if dim_in != dim_out:
+            self.residual_proj = Linear(dim_in, dim_out)
+
     def forward(self, x, edge_index):
+        residual = x
         x = self.gcn1(x, edge_index)
         x = torch.relu(x)
         x = F.dropout(x, p=0.5)
         x = self.gcn2(x, edge_index)
+
+        # Add residual connection
+        if self.residual_proj:
+            residual = self.residual_proj(residual)
+        x += residual
+
         return x, F.log_softmax(x, dim=1)
 
 class SocraticDecomposer(nn.Module):
@@ -105,151 +116,132 @@ class SocraticMAGDi(nn.Module):
         self.beta = beta    # Weight for node classification loss
         self.gamma = gamma  # Weight for contrastive loss
         self.delta = delta  # Weight for decomposer-solver alignment loss
-    
     def forward(self, decomposer, solver, pos, neg, graph):
-        """Forward pass without memory handling for high-memory GPU."""
+        """Forward pass with properly batched tensors."""
         
-        try:
-            # Quick validation
-            batch_size = len(decomposer)
-            
-            # Process tensors
-            decomposer_input_ids = torch.stack([item["prompt_input_ids"] for item in decomposer])
-            decomposer_attention_mask = torch.stack([item["prompt_attention_mask"] for item in decomposer])
-            decomposer_labels = torch.stack([item["completion_input_ids"] for item in decomposer])
-            
-            solver_input_ids = torch.stack([item["prompt_input_ids"] for item in solver])
-            solver_attention_mask = torch.stack([item["prompt_attention_mask"] for item in solver])
-            solver_labels = torch.stack([item["completion_input_ids"] for item in solver])
-            
-            pos_input_ids = torch.stack([item["input_ids"] for item in pos])
-            pos_attention_mask = torch.stack([item["attention_mask"] for item in pos])
-            pos_labels = torch.stack([item["labels"] for item in pos])
-            
-            neg_input_ids = torch.stack([item["input_ids"] for item in neg])
-            neg_attention_mask = torch.stack([item["attention_mask"] for item in neg])
-            neg_labels = torch.stack([item["labels"] for item in neg])
-                        
-            # Component computations
-            decomposer_loss, decomposer_emb = self.decomposer(
-                decomposer_input_ids, decomposer_attention_mask, decomposer_labels
-            )
-            
-            solver_loss, solver_emb = self.solver(
-                solver_input_ids, solver_attention_mask, solver_labels
-            )
-            
-            pos_loss, pos_emb = self.solver(pos_input_ids, pos_attention_mask, pos_labels)
-            
-            _, neg_emb = self.solver(neg_input_ids, neg_attention_mask, None)
-            
-            # Contrastive computation
-            pos_h = torch.relu(self.mlp1(pos_emb))
-            pos_score = torch.tanh(self.mlp2(pos_h))
-            neg_h = torch.relu(self.mlp1(neg_emb))
-            neg_score = torch.tanh(self.mlp2(neg_h))
-            
-            mr_cri = torch.nn.MarginRankingLoss(1.0, reduction='mean').to(pos_score.device)
-            mr_loss = mr_cri(pos_score, neg_score, torch.ones_like(pos_score).to(pos_score.device))
-            
-            from torch_geometric.loader import DataLoader
-            graph_loader = DataLoader(graph, batch_size=len(graph), shuffle=False, pin_memory=False, num_workers=0)
-            graph_batch = next(iter(graph_loader))
-            
-            gcn_output, logits = self.gcn(graph_batch.x, graph_batch.edge_index)
-            graph_batch.y = graph_batch.y.to(logits.device)
-            ce_cri = torch.nn.CrossEntropyLoss()
-            node_loss = ce_cri(logits, graph_batch.y)
-            
-            alignment_loss = F.mse_loss(decomposer_emb, solver_emb)
-            
-            # Calculate final losses
-            lm_combined = self.alpha * (decomposer_loss + solver_loss + pos_loss)
-            node_weighted = self.beta * node_loss
-            mr_weighted = self.gamma * mr_loss
-            alignment_weighted = self.delta * alignment_loss
-            
-            total_loss = lm_combined + node_weighted + mr_weighted + alignment_weighted
-                        
-            return (lm_combined, node_weighted, mr_weighted, alignment_weighted)
-            
-        except Exception as e:
-            print(f"🚨 CRASH in forward pass: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-            device = next(self.parameters()).device
-            dummy = torch.tensor(0.1, device=device, requires_grad=True)
-            return dummy, dummy, dummy, dummy
-        
-        
-
-
-class SocraticMAGDiDataCollator:
+        # Access tensors directly from the dictionaries
+        decomposer_input_ids = decomposer['input_ids']
+        decomposer_attention_mask = decomposer['attention_mask']
+        decomposer_labels = decomposer['labels']
     
-    def __init__(self, tokenizer):
+        solver_input_ids = solver['input_ids']
+        solver_attention_mask = solver['attention_mask']
+        solver_labels = solver['labels']
+    
+        pos_input_ids = pos['input_ids']
+        pos_attention_mask = pos['attention_mask']
+        pos_labels = pos['labels']
+    
+        neg_input_ids = neg['input_ids']
+        neg_attention_mask = neg['attention_mask']
+        neg_labels = neg['labels']
+    
+        # Component computations
+        decomposer_loss, decomposer_emb = self.decomposer(
+            decomposer_input_ids, decomposer_attention_mask, decomposer_labels
+        )
+        solver_loss, solver_emb = self.solver(
+            solver_input_ids, solver_attention_mask, solver_labels
+        )
+        
+        # Dummy value masking
+        pos_mask = (pos_input_ids.sum(dim=1) != 0).float().unsqueeze(-1)
+        neg_mask = (neg_input_ids.sum(dim=1) != 0).float().unsqueeze(-1)
+    
+        # Contrastive learning with mask
+        pos_loss, pos_emb = self.solver(pos_input_ids, pos_attention_mask, pos_labels)
+        _, neg_emb = self.solver(neg_input_ids, neg_attention_mask, neg_labels)
+        
+        pos_h = torch.relu(self.mlp1(pos_emb)) * pos_mask
+        pos_score = torch.tanh(self.mlp2(pos_h))
+        neg_h = torch.relu(self.mlp1(neg_emb)) * neg_mask
+        neg_score = torch.tanh(self.mlp2(neg_h))
+        
+        mr_cri = torch.nn.MarginRankingLoss(1.0, reduction='mean')
+        mr_loss = mr_cri(pos_score, neg_score, torch.ones_like(pos_score))
+        
+        # Node classification with valid node masking
+        valid_nodes = (graph.x.sum(dim=1) != 0).float()
+        gcn_output, logits = self.gcn(graph.x, graph.edge_index)
+        node_loss = (F.cross_entropy(logits, graph.y, reduction='none') * valid_nodes).mean()
+    
+        # Alignment loss with valid example masking
+        valid_decomposer = (decomposer_input_ids.sum(dim=1) != 0).float().unsqueeze(-1)
+        valid_solver = (solver_input_ids.sum(dim=1) != 0).float().unsqueeze(-1)
+        alignment_loss = F.mse_loss(
+            decomposer_emb * valid_decomposer, 
+            solver_emb * valid_solver
+        )
+    
+        # Final loss calculation
+        lm_combined = self.alpha * (decomposer_loss + solver_loss + pos_loss)
+        node_weighted = self.beta * node_loss
+        mr_weighted = self.gamma * mr_loss
+        alignment_weighted = self.delta * alignment_loss
+    
+        total_loss = lm_combined + node_weighted + mr_weighted + alignment_weighted
+    
+        return (lm_combined, node_weighted, mr_weighted, alignment_weighted)
+from transformers import PreTrainedTokenizerBase
+from torch_geometric.data import Batch
+class SocraticMAGDiDataCollator:
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, max_length=512):
         self.tokenizer = tokenizer
-        
-    def __call__(self, batch):        
-        # Handle variable-length lists by taking first item from each list
-        # (or implement more sophisticated aggregation if needed)
-        
-        processed_batch = {
-            "decomposer": [],
-            "solver": [], 
-            "pos": [],
-            "neg": [],
-            "graph": []
-        }
-        
+        self.max_length = max_length
+
+    def _collate_component(self, batch, component, input_keys):
+        texts = []
+        labels = []
         for item in batch:
-            # Get first decomposer example if exists, else create dummy
-            if item["decomposer"]:
-                decomposer_item = item["decomposer"][0]
+            ex = item[component][0]
+            # For decomposer/solver, use completion as both input and label (causal LM)
+            if component in ["decomposer", "solver"]:
+                # If prompt and completion are both needed, concatenate them here
+                # Otherwise, just use completion
+                input_ids = ex[input_keys[2]]
+                texts.append(self.tokenizer.decode(input_ids) if isinstance(input_ids, (list, tuple)) else self.tokenizer.decode(input_ids.tolist()))
+                labels.append(self.tokenizer.decode(input_ids) if isinstance(input_ids, (list, tuple)) else self.tokenizer.decode(input_ids.tolist()))
             else:
-                # Create dummy tensors if no decomposer examples
-                decomposer_item = {
-                    "prompt_input_ids": torch.zeros(512, dtype=torch.long),
-                    "prompt_attention_mask": torch.zeros(512, dtype=torch.long),
-                    "completion_input_ids": torch.zeros(512, dtype=torch.long),
-                    "completion_attention_mask": torch.zeros(512, dtype=torch.long)
-                }
-            processed_batch["decomposer"].append(decomposer_item)
-            
-            # Get first solver example if exists, else create dummy  
-            if item["solver"]:
-                solver_item = item["solver"][0]
-            else:
-                solver_item = {
-                    "prompt_input_ids": torch.zeros(512, dtype=torch.long),
-                    "prompt_attention_mask": torch.zeros(512, dtype=torch.long),
-                    "completion_input_ids": torch.zeros(512, dtype=torch.long),
-                    "completion_attention_mask": torch.zeros(512, dtype=torch.long)
-                }
-            processed_batch["solver"].append(solver_item)
-            
-            # Get first positive example if exists, else create dummy
-            if item["pos"]:
-                pos_item = item["pos"][0]
-            else:
-                pos_item = {
-                    "input_ids": torch.zeros(512, dtype=torch.long),
-                    "attention_mask": torch.zeros(512, dtype=torch.long),
-                    "labels": torch.zeros(512, dtype=torch.long)
-                }
-            processed_batch["pos"].append(pos_item)
-            
-            # Get first negative example if exists, else create dummy
-            if item["neg"]:
-                neg_item = item["neg"][0] 
-            else:
-                neg_item = {
-                    "input_ids": torch.zeros(512, dtype=torch.long),
-                    "attention_mask": torch.zeros(512, dtype=torch.long),
-                    "labels": torch.zeros(512, dtype=torch.long)
-                }
-            processed_batch["neg"].append(neg_item)
-            
-            # Add graph
-            processed_batch["graph"].append(item["graph"])
-        
+                # For pos/neg, use input_ids and labels as is
+                input_ids = ex[input_keys[0]]
+                label_ids = ex[input_keys[2]]
+                texts.append(self.tokenizer.decode(input_ids) if isinstance(input_ids, (list, tuple)) else self.tokenizer.decode(input_ids.tolist()))
+                labels.append(self.tokenizer.decode(label_ids) if isinstance(label_ids, (list, tuple)) else self.tokenizer.decode(label_ids.tolist()))
+        # Tokenize and pad
+        tokenized = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+        # Tokenize and pad labels separately to ensure same length
+        tokenized_labels = self.tokenizer(
+            labels,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+        # Set labels to the tokenized label ids
+        tokenized["labels"] = tokenized_labels["input_ids"]
+        return tokenized
+
+    def __call__(self, batch):
+        processed_batch = {}
+        # Collate each component
+        processed_batch["decomposer"] = self._collate_component(
+            batch, "decomposer", ["prompt_input_ids", "prompt_attention_mask", "completion_input_ids"]
+        )
+        processed_batch["solver"] = self._collate_component(
+            batch, "solver", ["prompt_input_ids", "prompt_attention_mask", "completion_input_ids"]
+        )
+        processed_batch["pos"] = self._collate_component(
+            batch, "pos", ["input_ids", "attention_mask", "labels"]
+        )
+        processed_batch["neg"] = self._collate_component(
+            batch, "neg", ["input_ids", "attention_mask", "labels"]
+        )
+        # Collate graphs
+        processed_batch["graph"] = Batch.from_data_list([item["graph"] for item in batch])
         return processed_batch
