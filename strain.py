@@ -784,322 +784,192 @@ def create_mag_dataset(training_data, agents, client):
     return mag_dataset
 
 
-def prepare_socratic_examples(mag_dataset, tokenizer):
-    """Prepare examples for training the Socratic model components, grouped by MAG item"""
-    decomposer_examples = []  # List of lists (one per MAG item)
-    solver_examples = []  # List of lists (one per MAG item)
+import torch
+from tqdm import tqdm
 
-    for item in mag_dataset:
-        question = item["question"]
-        graph = item["graph"]
+def prepare_training_examples(dataset, tokenizer, max_length=512):
+    """
+    Prepares decomposer, solver, positive, and negative examples for MAGDi-style multi-agent reasoning.
+    - Positive: Correct reasoning chains (final answer == gold).
+    - Negative: Incorrect reasoning chains (final answer != gold), with synthetic negatives if needed.
+    - Decomposer: Always synthetic, model-inspired decomposition steps per question.
+    - Reasoning chains are built as sequences of nodes connected by influence, and treated as positive/negative.
+    - Dummy values are inserted for missing positive/negative examples.
 
-        # Per-item lists
+    Returns:
+        tuple: (decomposer_examples, solver_examples, positive_examples, negative_examples)
+               Each is a list of lists, outer length = len(dataset), inner = examples for that item.
+    """
+    decomposer_examples = []
+    solver_examples = []
+    positive_examples = []
+    negative_examples = []
+
+    dummy_tensor = torch.zeros(max_length, dtype=torch.long)
+
+    for item in tqdm(dataset, desc="Preparing Training Examples"):
         item_decomposer = []
         item_solver = []
-
-        # Extract sub-questions (nodes with highest influence)
-        sub_questions = []
-        for node, data in graph.nodes(data=True):
-            if data.get('type') == 'response' and graph.in_degree(node) > 1:
-                sub_questions.append(data.get('content', ''))
-
-        if sub_questions:
-            # Create decomposer example for this item
-            decomposer_prompt = f"Question: {question}\nBreak this down into sub-questions:"
-            decomposer_completion = "\n".join([f"- {sq[:100]}..." for sq in sub_questions[:3]])
-
-            # Tokenize immediately for this item
-            prompt_tokens = tokenizer(
-                decomposer_prompt,
-                truncation=True,
-                max_length=512,
-                padding="max_length",
-                return_tensors="pt"
-            )
-            completion_tokens = tokenizer(
-                decomposer_completion,
-                truncation=True,
-                max_length=512,
-                padding="max_length",
-                return_tensors="pt"
-            )
-            item_decomposer.append({
-                "prompt_input_ids": prompt_tokens.input_ids[0],
-                "prompt_attention_mask": prompt_tokens.attention_mask[0],
-                "completion_input_ids": completion_tokens.input_ids[0],
-                "completion_attention_mask": completion_tokens.attention_mask[0]
-            })
-
-        # Find sub-question answers (solver examples) for this item
-        for node, data in graph.nodes(data=True):
-            if data.get('type') == 'response' and data.get('round', 0) > 0:
-                influencers = []
-                for pred in graph.predecessors(node):
-                    if graph.nodes[pred].get('type') == 'response':
-                        influencers.append(pred)
-
-                if influencers:
-                    influencer_content = graph.nodes[influencers[0]].get('content', '')
-                    solver_prompt = f"Question: {influencer_content[:100]}..."
-                    solver_completion = data.get('content', '')
-
-                    # Tokenize immediately for this item
-                    prompt_tokens = tokenizer(
-                        solver_prompt,
-                        truncation=True,
-                        max_length=512,
-                        padding="max_length",
-                        return_tensors="pt"
-                    )
-                    completion_tokens = tokenizer(
-                        solver_completion,
-                        truncation=True,
-                        max_length=512,
-                        padding="max_length",
-                        return_tensors="pt"
-                    )
-                    item_solver.append({
-                        "prompt_input_ids": prompt_tokens.input_ids[0],
-                        "prompt_attention_mask": prompt_tokens.attention_mask[0],
-                        "completion_input_ids": completion_tokens.input_ids[0],
-                        "completion_attention_mask": completion_tokens.attention_mask[0]
-                    })
-
-        # Add per-item lists to main lists
-        decomposer_examples.append(item_decomposer)
-        solver_examples.append(item_solver)
-
-    return decomposer_examples, solver_examples
-
-
-def prepare_pos_neg_examples(mag_dataset, tokenizer, max_path_length=4):
-    """Prepare positive/negative examples with correct input-label pairs"""
-    pos_examples = []
-    neg_examples = []
-
-    for item in mag_dataset:
-        question = item["question"]
-        graph = item["graph"]
-        
         item_pos = []
         item_neg = []
 
-        # Get response nodes
-        response_nodes = [
-            n for n, data in graph.nodes(data=True)
-            if data.get('type') in ['response', 'initial_response']
-        ]
+        question = item.get('question')
+        gold_answer = str(item.get('gold_answer', '')).strip().lower()
+        nx_graph = item.get('graph')
+        pyg_data = item.get('pyg_data')
 
-        # Process positive examples (correct reasoning)
-        correct_nodes = [
-            n for n in response_nodes 
-            if graph.nodes[n].get('is_correct', False)
-        ]
-        
-        for node in correct_nodes[:3]:  # Limit to 3 examples per item
-            content = graph.nodes[node].get('content', '')
-            if not content or len(content.strip()) < 10:
-                continue  # Skip empty or very short content
-                
-            # Create proper prompt-completion pair
-            prompt = f"Question: {question}\nProvide valid reasoning:"
-            
-            # Tokenize prompt and completion separately
-            prompt_tokens = tokenizer(
-                prompt,
-                truncation=True,
-                max_length=256,  # Shorter to leave room for completion
-                padding=False,
-                return_tensors="pt"
-            )
-            
-            completion_tokens = tokenizer(
-                content,
-                truncation=True,
-                max_length=256,
-                padding=False,
-                return_tensors="pt"
-            )
-            
-            # Create input_ids by concatenating prompt + completion
-            input_ids = torch.cat([
-                prompt_tokens.input_ids[0],
-                completion_tokens.input_ids[0]
-            ])
-            
-            # Create labels: -100 for prompt tokens, completion tokens for loss
-            labels = torch.cat([
-                torch.full((len(prompt_tokens.input_ids[0]),), -100),  # Ignore prompt in loss
-                completion_tokens.input_ids[0]  # Predict completion
-            ])
-            
-            # Pad to max_length
-            max_len = 512
-            if len(input_ids) > max_len:
-                input_ids = input_ids[:max_len]
-                labels = labels[:max_len]
-            else:
-                # Pad with tokenizer.pad_token_id
-                pad_length = max_len - len(input_ids)
-                input_ids = torch.cat([
-                    input_ids,
-                    torch.full((pad_length,), tokenizer.pad_token_id)
-                ])
-                labels = torch.cat([
-                    labels,
-                    torch.full((pad_length,), -100)  # Ignore padding in loss
-                ])
-            
-            # Create attention mask
-            attention_mask = (input_ids != tokenizer.pad_token_id).long()
-            
-            item_pos.append({
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "labels": labels
-            })
+        # Handle missing data with dummy examples
+        if not all([question, gold_answer, nx_graph, hasattr(nx_graph, 'nodes'), pyg_data]):
+            dummy_example = {
+                "input_ids": dummy_tensor,
+                "attention_mask": dummy_tensor,
+                "labels": dummy_tensor.clone(),
+                "subgraph_x": dummy_tensor,
+                "subgraph_edge_index": torch.zeros((2,0), dtype=torch.long)
+            }
+            dummy_decomposer = {
+                "prompt_input_ids": dummy_tensor,
+                "prompt_attention_mask": dummy_tensor,
+                "completion_input_ids": dummy_tensor,
+                "completion_attention_mask": dummy_tensor,
+            }
+            dummy_solver = {
+                "prompt_input_ids": dummy_tensor,
+                "prompt_attention_mask": dummy_tensor,
+                "completion_input_ids": dummy_tensor,
+                "completion_attention_mask": dummy_tensor,
+            }
+            decomposer_examples.append([dummy_decomposer])
+            solver_examples.append([dummy_solver])
+            positive_examples.append([dummy_example])
+            negative_examples.append([dummy_example])
+            continue
 
-        # Process negative examples (incorrect reasoning)
-        incorrect_nodes = [
-            n for n in response_nodes 
-            if not graph.nodes[n].get('is_correct', False)
-        ]
-        
-        for node in incorrect_nodes[:3]:  # Limit to 3 examples per item
-            content = graph.nodes[node].get('content', '')
-            if not content or len(content.strip()) < 10:
+        # --- Decomposer: Always generate a synthetic decomposition ---
+        decomposer_prompt = (
+            f"Decompose the following question into a sequence of simpler sub-questions that, when answered, "
+            f"would help solve the main question:\n\nQuestion: {question}"
+        )
+        decomposer_completion = (
+            "1. What are the key facts or entities in the question?\n"
+            "2. What is being asked or claimed?\n"
+            "3. What evidence or reasoning links the facts to the answer?\n"
+            "4. What is the final answer based on the above?"
+        )
+        prompt_tok = tokenizer(decomposer_prompt, max_length=max_length, truncation=True, return_tensors="pt")
+        comp_tok = tokenizer(decomposer_completion, max_length=max_length, truncation=True, return_tensors="pt")
+        item_decomposer.append({
+            "prompt_input_ids": prompt_tok.input_ids.squeeze(0),
+            "prompt_attention_mask": prompt_tok.attention_mask.squeeze(0),
+            "completion_input_ids": comp_tok.input_ids.squeeze(0),
+            "completion_attention_mask": comp_tok.attention_mask.squeeze(0)
+        })
+
+        # --- Build reasoning chains and process solver examples ---
+        def build_chains(node_id, current_chain=[]):
+            chain = current_chain + [node_id]
+            influencers = nx_graph.nodes[node_id].get('influenced_by', [])
+            if not influencers:
+                return [chain]
+            return [c for inf in influencers for c in build_chains(inf, chain.copy())]
+
+        for node_id, node_data in nx_graph.nodes(data=True):
+            if node_data.get("type") not in ["initial_response", "response"]:
                 continue
-                
-            prompt = f"Question: {question}\nIdentify flawed reasoning:"
-            
-            # Same process as positive examples
-            prompt_tokens = tokenizer(
-                prompt,
-                truncation=True,
-                max_length=256,
-                padding=False,
-                return_tensors="pt"
+
+            # Create solver example for this individual node
+            analysis = node_data.get("content", "")
+            role = node_data.get("role", "Agent")
+            round_num = node_data.get("round", 0)
+            influencers = node_data.get("influenced_by", [])
+            influence_str = f"\nAfter considering input from: {', '.join(influencers)}" if influencers else ""
+
+            solver_prompt = (
+                f"Question: {question}\n\nRole: {role}\nRound: {round_num}{influence_str}\n\n"
+                f"Provide your detailed analysis and final decision."
             )
-            
-            completion_tokens = tokenizer(
-                content,
-                truncation=True,
-                max_length=256,
-                padding=False,
-                return_tensors="pt"
-            )
-            
-            input_ids = torch.cat([
-                prompt_tokens.input_ids[0],
-                completion_tokens.input_ids[0]
-            ])
-            
-            labels = torch.cat([
-                torch.full((len(prompt_tokens.input_ids[0]),), -100),
-                completion_tokens.input_ids[0]
-            ])
-            
-            # Pad to max_length
-            max_len = 512
-            if len(input_ids) > max_len:
-                input_ids = input_ids[:max_len]
-                labels = labels[:max_len]
-            else:
-                pad_length = max_len - len(input_ids)
-                input_ids = torch.cat([
-                    input_ids,
-                    torch.full((pad_length,), tokenizer.pad_token_id)
-                ])
-                labels = torch.cat([
-                    labels,
-                    torch.full((pad_length,), -100)
-                ])
-            
-            attention_mask = (input_ids != tokenizer.pad_token_id).long()
-            
-            item_neg.append({
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "labels": labels
+            prompt_tok = tokenizer(solver_prompt, max_length=max_length, truncation=True, return_tensors="pt")
+            comp_tok = tokenizer(analysis, max_length=max_length, truncation=True, return_tensors="pt")
+            item_solver.append({
+                "prompt_input_ids": prompt_tok.input_ids.squeeze(0),
+                "prompt_attention_mask": prompt_tok.attention_mask.squeeze(0),
+                "completion_input_ids": comp_tok.input_ids.squeeze(0),
+                "completion_attention_mask": comp_tok.attention_mask.squeeze(0)
             })
 
-        pos_examples.append(item_pos)
-        neg_examples.append(item_neg)
+            # Process reasoning chains for pos/neg examples
+            chains = build_chains(node_id)
+            for chain in chains:
+                chain_is_positive = True
+                chain_text = []
+                chain_nodes = []
 
-    return pos_examples, neg_examples
-def validate_and_fix_examples(pos_examples, neg_examples, tokenizer):
-    """Fix malformed examples that cause NaN losses"""
-    fixed_pos = []
-    fixed_neg = []
-    
-    for i, (pos_list, neg_list) in enumerate(zip(pos_examples, neg_examples)):
-        # Fix positive examples
-        if not pos_list:  # Empty list
-            # Create dummy positive example
-            dummy_text = "This is a valid reasoning step."
-            tokens = tokenizer(
-                dummy_text,
-                truncation=True,
-                max_length=512,
-                padding="max_length",
-                return_tensors="pt"
-            )
-            pos_list = [{
-                "input_ids": tokens.input_ids[0],
-                "attention_mask": tokens.attention_mask[0],
-                "labels": tokens.input_ids[0].clone()
-            }]
-        else:
-            # Validate existing examples
-            validated_pos = []
-            for pos_item in pos_list:
-                # Check for valid tensors
-                if (torch.is_tensor(pos_item.get("input_ids")) and 
-                    torch.is_tensor(pos_item.get("attention_mask")) and
-                    torch.is_tensor(pos_item.get("labels"))):
-                    
-                    # Check for all-zero or invalid tokens
-                    if pos_item["input_ids"].sum() > 0:
-                        validated_pos.append(pos_item)
-            
-            if not validated_pos:  # All examples were invalid
-                # Create dummy
-                dummy_text = "This is a valid reasoning step."
-                tokens = tokenizer(
-                    dummy_text,
-                    truncation=True,
-                    max_length=512,
-                    padding="max_length",
-                    return_tensors="pt"
-                )
-                pos_list = [{
-                    "input_ids": tokens.input_ids[0],
-                    "attention_mask": tokens.attention_mask[0],
-                    "labels": tokens.input_ids[0].clone()
-                }]
-            else:
-                pos_list = validated_pos
-        
-        # Same validation for negative examples
-        if not neg_list:
-            dummy_text = "This is a flawed reasoning step."
-            tokens = tokenizer(
-                dummy_text,
-                truncation=True,
-                max_length=512,
-                padding="max_length",
-                return_tensors="pt"
-            )
-            neg_list = [{
-                "input_ids": tokens.input_ids[0],
-                "attention_mask": tokens.attention_mask[0],
-                "labels": tokens.input_ids[0].clone()
-            }]
-        
-        fixed_pos.append(pos_list)
-        fixed_neg.append(neg_list)
-    
-    return fixed_pos, fixed_neg
+                for n in chain:
+                    n_data = nx_graph.nodes[n]
+                    decision = (n_data.get("decision") or "").strip().lower()
+                    if decision and decision in ["true", "false"] and decision != gold_answer:
+                        chain_is_positive = False
+                    chain_text.append(n_data.get("content", ""))
+                    chain_nodes.append(n)
+
+                full_chain = "\n".join(chain_text)
+                tokenized_chain = tokenizer(full_chain, max_length=max_length, truncation=True, return_tensors="pt")
+                example_dict = {
+                    "input_ids": tokenized_chain.input_ids.squeeze(0),
+                    "attention_mask": tokenized_chain.attention_mask.squeeze(0),
+                    "labels": tokenized_chain.input_ids.squeeze(0).clone(),
+                    "chain_nodes": chain_nodes,
+                    "subgraph_x": pyg_data.x,
+                    "subgraph_edge_index": pyg_data.edge_index,
+                }
+
+                if chain_is_positive:
+                    item_pos.append(example_dict)
+                else:
+                    item_neg.append(example_dict)
+
+        # --- Ensure all components have at least 1 example ---
+        if not item_decomposer:
+            print(1)
+            item_decomposer.append({
+                "prompt_input_ids": dummy_tensor,
+                "prompt_attention_mask": dummy_tensor,
+                "completion_input_ids": dummy_tensor,
+                "completion_attention_mask": dummy_tensor,
+            })
+        if not item_solver:
+            print(2)
+            item_solver.append({
+                "prompt_input_ids": dummy_tensor,
+                "prompt_attention_mask": dummy_tensor,
+                "completion_input_ids": dummy_tensor,
+                "completion_attention_mask": dummy_tensor,
+            })
+        if not item_pos:
+            item_pos.append({
+                "input_ids": dummy_tensor,
+                "attention_mask": dummy_tensor,
+                "labels": dummy_tensor.clone(),
+                "chain_nodes": [],
+                "subgraph_x": pyg_data.x,
+                "subgraph_edge_index": pyg_data.edge_index,
+            })
+        if not item_neg:
+            item_neg.append({
+                "input_ids": dummy_tensor,
+                "attention_mask": dummy_tensor,
+                "labels": dummy_tensor.clone(),
+                "chain_nodes": [],
+                "subgraph_x": pyg_data.x,
+                "subgraph_edge_index": pyg_data.edge_index,
+            })
+
+        decomposer_examples.append(item_decomposer)
+        solver_examples.append(item_solver)
+        positive_examples.append(item_pos)
+        negative_examples.append(item_neg)
+
+    return decomposer_examples, solver_examples, positive_examples, negative_examples
 
 
 # Cell: Main Training Function (Jupyter Compatible)
@@ -1194,9 +1064,9 @@ def main():
             agent["weight"] = 0.2031
         else:
             agent["weight"] = 0.1992
-
+    import pickle
     # Load the saved MAG dataset from the pickle file
-    with open('mag_dataset.pkl', 'rb') as f:
+    with open('mag_dataset_new.pkl', 'rb') as f:
         mag_dataset = pickle.load(f)
     
     # Process dataset items
@@ -1225,136 +1095,18 @@ def main():
         item['gold_answer'] = gold_answer
         item['final_decision'] = final_decision
         item['is_correct'] = (final_decision == gold_answer) if final_decision and gold_answer else False
-
-    # Filter dataset to keep only consensus examples
-    round_counts = {"initial": 0, "round1": 0, "round2": 0, "no_consensus": 0}
-    filtered_mag_dataset = []
-
-    for item in mag_dataset:
-        graph = item["graph"]
-        consensus_round = None
-        round_label = {0: "initial", 1: "round1", 2: "round2"}
-        
-        agent_roles = set(
-            node_data.get('role')
-            for node_id, node_data in graph.nodes(data=True)
-            if node_data.get('type') in ['response', 'initial_response']
-        )
-        
-        max_round = max(
-            (node_data.get('round', 0)
-             for node_id, node_data in graph.nodes(data=True)
-             if node_data.get('type') in ['response', 'initial_response']),
-            default=0
-        )
-        
-        for r in range(max_round + 1):
-            decisions = [
-                node_data.get('decision')
-                for node_id, node_data in graph.nodes(data=True)
-                if node_data.get('type') in ['response', 'initial_response'] and node_data.get('round', 0) == r
-            ]
-            
-            if len(decisions) == len(agent_roles) and len(set(decisions)) == 1:
-                consensus_round = r
-                break
-        
-        if consensus_round is not None:
-            filtered_mag_dataset.append(item)
-            label = round_label.get(consensus_round, f"round{consensus_round}")
-            round_counts[label] += 1
-        else:
-            round_counts["no_consensus"] += 1
-
-    print("Round distribution:", round_counts)
-
-    # Remove initial round consensus examples
-    filtered_by_rounds = []
-    for item in filtered_mag_dataset:
-        graph = item["graph"]
-        max_round = max(
-            (node_data.get('round', 0)
-             for node_id, node_data in graph.nodes(data=True)
-             if node_data.get('type') in ['response', 'initial_response']),
-            default=0
-        )
-        if max_round > 0:
-            filtered_by_rounds.append(item)
-
-    mag_dataset = filtered_by_rounds
-    print(f"After filtering: {len(mag_dataset)} examples")
-
-    # Calculate MAS Consensus Accuracy
-    print("\n=== Multi-Agent System (MAS) Final Consensus Accuracy ===")
-    consensus_results = []
-    
-    for item in mag_dataset:
-        question = item["question"]
-        graph = item["graph"]
-        final_decision = None
-        gold_answer = None
-
-        # Look for consensus decision in graph nodes
-        for node_id, node_data in graph.nodes(data=True):
-            if node_data.get('type') in ['response', 'initial_response']:
-                if node_data.get('decision') and node_data.get('gold_answer'):
-                    gold_answer = str(node_data['gold_answer']).strip().lower()
-                    break
-
-        # Get the final consensus decision by finding the most recent decision
-        max_round = -1
-        for node_id, node_data in graph.nodes(data=True):
-            if node_data.get('type') in ['response', 'initial_response']:
-                round_num = node_data.get('round', 0)
-                if round_num > max_round:
-                    max_round = round_num
-                    final_decision = node_data.get('decision', '').strip().lower()
-
-        # Determine if final consensus was correct
-        if final_decision and gold_answer:
-            is_consensus_correct = (final_decision == gold_answer)
-            consensus_results.append({
-                'question': question[:50] + '...',
-                'final_decision': final_decision,
-                'gold_answer': gold_answer,
-                'correct': is_consensus_correct
-            })
-
-    # Calculate final consensus accuracy
-    total_questions = len(consensus_results)
-    correct_consensus = sum(1 for result in consensus_results if result['correct'])
-    consensus_accuracy = correct_consensus / total_questions if total_questions > 0 else 0
-
-    print(f"Total questions processed: {total_questions}")
-    print(f"Correct final consensus decisions: {correct_consensus}")
-    print(f"Incorrect final consensus decisions: {total_questions - correct_consensus}")
-    print(f"MAS Final Consensus Accuracy: {consensus_accuracy:.1%} ({correct_consensus}/{total_questions})")
-
     # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(DECOMPOSER_MODEL)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    decomposer_examples, solver_examples, pos_examples, neg_examples = prepare_training_examples(mag_dataset, tokenizer, max_length=512)
+# Your filtering loop will run after this, and the output should make more sense.
 
-    # Prepare examples for Socratic model components
-    print("Preparing examples for Socratic model components")
-    decomposer_examples, solver_examples = prepare_socratic_examples(mag_dataset, tokenizer)
-
-    # Prepare positive and negative examples for contrastive learning
-    print("Preparing examples for contrastive learning")
-    pos_examples, neg_examples = prepare_pos_neg_examples(mag_dataset, tokenizer)
-    # Add this to your main() function after preparing examples:
-    print("🔧 Validating and fixing examples...")
-    pos_examples, neg_examples = validate_and_fix_examples(pos_examples, neg_examples, tokenizer)
-
-
-    # Extract PyG graphs
     pyg_graphs = [item["pyg_data"] for item in mag_dataset]
     print(f"Decomposer examples: {len(decomposer_examples)}")
     print(f"Solver examples: {len(solver_examples)}")
     print(f"Positive examples: {len(pos_examples)}")
     print(f"Negative examples: {len(neg_examples)}")
-
-    # Create dataset
     examples = []
     num_graphs = len(mag_dataset)
     for i in range(num_graphs):
@@ -1386,21 +1138,22 @@ def main():
     # In your main() function, change training args to:
     training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    num_train_epochs=5,                    # Reduce epochs
+    num_train_epochs=10,                    # Reduce epochs
     per_device_train_batch_size=1,         # Reduce to 1
-    gradient_accumulation_steps=4,          # Simulate batch size 4
-    learning_rate=1e-7,                    # Very conservative LR
-    weight_decay=0.0,                      
-    max_grad_norm=0.1,                     
+    gradient_accumulation_steps=64,          # Simulate batch size 4
+    learning_rate=5e-6,                    # Very conservative LR
+    weight_decay=0.01,                      
+    max_grad_norm=1.0,                     
     logging_steps=1,                       
     save_strategy="no",                    
-    warmup_steps=0,                        
-    lr_scheduler_type="constant",
+    warmup_steps=50,                        
+    lr_scheduler_type="cosine",
     save_safetensors=False,
     dataloader_pin_memory=False,
     fp16=False,                            # DISABLE FP16
     gradient_checkpointing=False,           # Enable for memory
-    dataloader_num_workers=0,              # Disable multiprocessing
+    dataloader_num_workers=0,   # Disable multiprocessing
+    remove_unused_columns=False
     )
 
 
