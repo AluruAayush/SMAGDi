@@ -180,7 +180,14 @@ class SocraticMAGDi(nn.Module):
         alignment_weighted = self.delta * alignment_loss
     
         total_loss = lm_combined + node_weighted + mr_weighted + alignment_weighted
-    
+        return {
+            "loss": total_loss,
+            "lm_loss": lm_combined,
+            "node_loss": node_weighted,
+            "mr_loss": mr_weighted,
+            "alignment_loss": alignment_weighted
+        }
+
         return (lm_combined, node_weighted, mr_weighted, alignment_weighted)
 from transformers import PreTrainedTokenizerBase
 from torch_geometric.data import Batch
