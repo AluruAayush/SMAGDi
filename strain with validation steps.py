@@ -26,6 +26,10 @@ import re
 import sys
 import tensorboardX
 import sklearn
+from transformers import EarlyStoppingCallback
+from transformers import IntervalStrategy
+
+
 
 
 # Agent role specifications
@@ -285,12 +289,7 @@ class MAGDiDataset(Dataset):
         }
 
 class SocraticMAGDiTrainer(Trainer):
-    """Custom trainer for the SocraticMAGDi model."""
-
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch = None):
-        """
-        Compute the combined loss for the SocraticMAGDi model.
-        """
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         outputs = model(
             decomposer=inputs["decomposer"],
             solver=inputs["solver"],
@@ -298,14 +297,38 @@ class SocraticMAGDiTrainer(Trainer):
             neg=inputs["neg"],
             graph=inputs["graph"]
         )
-
-        lm_loss, node_loss, mr_loss, alignment_loss = outputs
-        total_loss = lm_loss + node_loss + mr_loss + alignment_loss
-
+        
+        # Extract the total loss
+        total_loss = outputs["loss"]
+        
         if return_outputs:
-            return total_loss, outputs
-
+            # Ensure outputs contain 'loss' for evaluation
+            outputs_dict = {
+                "loss": total_loss,
+                "lm_loss": outputs.get("lm_loss", total_loss),
+                "node_loss": outputs.get("node_loss", 0),
+                "mr_loss": outputs.get("mr_loss", 0),
+                "alignment_loss": outputs.get("alignment_loss", 0)
+            }
+            return total_loss, outputs_dict
         return total_loss
+    
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """
+        Custom prediction step to ensure loss is computed during evaluation.
+        """
+        model.eval()
+        inputs = self._prepare_inputs(inputs)
+        
+        with torch.no_grad():
+            loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+            
+        if prediction_loss_only:
+            return (loss, None, None)
+            
+        # Return loss, logits (if available), and labels (if available)
+        return (loss, None, None)
+
 
 
 def generate_analysis(agent, prompt, client, debate_round=0):
@@ -998,9 +1021,9 @@ def main():
     DELTA = 0.5  # Weight for decomposer-solver alignment loss
     
     # Training configuration
-    NUM_EPOCHS = 10
+    NUM_EPOCHS = 50
     BATCH_SIZE = 1
-    LEARNING_RATE = 5e-6
+    LEARNING_RATE = 1e-5
     
     # OpenAI API Key
     OPENAI_API_KEY = ENV[‘AUTH_TOKEN’]
@@ -1153,19 +1176,17 @@ def main():
         gamma=GAMMA,
         delta=DELTA
     )
-
     # TrainingArguments with validation enabled
     from transformers import TrainingArguments
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
-        num_train_epochs=NUM_EPOCHS,
-        per_device_train_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=64,
+        num_train_epochs=10,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=32,
         learning_rate=LEARNING_RATE,
         weight_decay=0.01,
         max_grad_norm=1.0,
         logging_steps=1,
-        save_strategy="no",
         warmup_steps=50,
         lr_scheduler_type="cosine",
         save_safetensors=False,
@@ -1174,9 +1195,13 @@ def main():
         gradient_checkpointing=False,
         dataloader_num_workers=0,
         remove_unused_columns=False,
-        do_eval=True,           # <-- add this
-        eval_steps=10,  # <-- Enable validation
         per_device_eval_batch_size=1, # <-- For validation
+        load_best_model_at_end=True,
+        metric_for_best_model='eval_loss',
+        greater_is_better=False,
+        eval_strategy=IntervalStrategy.EPOCH,  # <-- Use this in new versions
+        save_strategy=IntervalStrategy.EPOCH,
+        save_total_limit=1,          # Keep only 1 checkpoint
     )
 
     # Trainer with validation set
@@ -1185,7 +1210,8 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,  # <-- Validation set here
-        data_collator=SocraticMAGDiDataCollator(tokenizer)
+        data_collator=SocraticMAGDiDataCollator(tokenizer),
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=4)]
     )
 
     # Train model
