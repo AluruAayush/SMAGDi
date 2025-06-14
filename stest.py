@@ -182,11 +182,7 @@ def socratic_inference_unified(question, model, tokenizer, max_new_tokens, tempe
 
     # Step 1: Enhanced decomposer prompt for boolean questions
     print(f"🧩 STEP 1: DECOMPOSER - Breaking down the question...")
-    if dataset_type in ["boolean", "strategy-qa"]:
-        decomposer_prompt = f"Question: {question}\nThis is a yes/no question. Break this down into key sub-questions that will help determine if the answer is TRUE or FALSE:"
-    else:
-        decomposer_prompt = f"Question: {question}\nBreak this down into sub-questions:"
-    
+    decomposer_prompt = f"Question: {question}\nThis is a yes/no question. Break this down into a maximum of 5 sub-questions that will help determine if the answer is TRUE or FALSE: "    
     print(f"📤 Decomposer Prompt: {decomposer_prompt}")
 
     decomposer_inputs = tokenizer(
@@ -288,7 +284,7 @@ def socratic_inference_unified(question, model, tokenizer, max_new_tokens, tempe
         combined_prompt = f"Question: {question}\n\n"
         for i, (sub_q, sub_a) in enumerate(zip(sub_questions, sub_answers)):
             combined_prompt += f"Sub-question {i + 1}: {sub_q}\nAnswer: {sub_a}\n\n"
-        combined_prompt += "Based on the analysis above, is the answer to the original question TRUE or FALSE? Provide your final answer as either 'TRUE' or 'FALSE' and explain your reasoning:"
+        combined_prompt += f"Based on the analysis above, is the answer to {question} TRUE or FALSE? Provide your final answer as either 'TRUE' or 'FALSE' and explain your reasoning:"
     else:
         combined_prompt = f"Question: {question}\n\n"
         for i, (sub_q, sub_a) in enumerate(zip(sub_questions, sub_answers)):
