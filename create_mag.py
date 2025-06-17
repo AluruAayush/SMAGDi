@@ -802,21 +802,38 @@ def main():
     ]
 
     # Load dataset
-    full_train = load_dataset("wics/strategy-qa", split="test")
-    print("Sample data:", full_train[1])
-    full_train = full_train.train_test_split(test_size=0.20, seed=41)
-
-    # Split the 80% into two 40% halves
-    subsplits = full_train["train"].train_test_split(test_size=0.50)
-    agent_data = subsplits["train"]
-    mag_creation_data = subsplits["test"]
-    
+    full_train = load_dataset("cais/mmlu", "all", split = "auxiliary_train")
+    print(full_train[1])
+    random_indices = random.sample(range(len(full_train)), 200)
+    agent_data= full_train.select(random_indices)
+    #mag_creation_data = subsplits["test"]
+    #print(mag_creation_data)
     print(f"Agent weight set: {len(agent_data)} examples")
-    print(f"MAG creation set: {len(mag_creation_data)} examples")
+    #print(f"MAG creation set: {len(mag_creation_data)} examples")
+
+    # Train agent weights on agent_data
+    print("Training agent weights using training data")
+    training_examples = [
+        {"question": item["question"],
+         "answerKey": item["answer"],
+         "options": item["choices"]}
+        for item in agent_data
+    ]
+    agents = train_agent_weights(agents, training_examples, client)
+    # Build MAG dataset on mag_creation_data
+    print("Creating MAG dataset from training data")
+    training_data = [
+        {"question": item["question"],
+         "gold_answer": item["answer"],
+         "options": item["choices"]}
+        for item in mag_creation_data
+    ]
+    mag_dataset = create_mag_dataset(training_data, agents, client)
 
     # Load the saved MAG dataset from the pickle file
-    with open('mag_dataset_new.pkl', 'rb') as f:
-        mag_dataset = pickle.load(f)
+    os.makedirs("data", exist_ok=True)
+    with open("data/mag_dataset.pkl", "wb") as f:
+        pickle.dump(mag_dataset, f)
 # Run the training
 if __name__ == "__main__":
     main()
