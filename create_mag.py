@@ -12,12 +12,9 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader as PyGDataLoader
 from transformers import (
     AutoTokenizer,
-    Trainer,
-    TrainingArguments,
+    pipeline,
     set_seed
 )
-import openai
-
 #from smodel import SocraticMAGDi, SocraticMAGDiDataCollator
 from datasets import load_dataset
 import random
@@ -26,7 +23,7 @@ import re
 import sys
 import tensorboardX
 
-# Agent role specifications
+# Agent role specifications (unchanged)
 role_specifications = {
     "Scientist": {
         "temperature": 0.3,
@@ -199,8 +196,44 @@ Deviation from this format will exclude you from consensus.
 """
     }
 }
+# === Llama 3.1 8B Instruct Setup ===
+LLAMA_MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
+print("Loading Llama 3.1 8B Instruct model and tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(LLAMA_MODEL_ID)
+llama_pipeline = pipeline(
+    "text-generation",
+    model=LLAMA_MODEL_ID,
+    tokenizer=tokenizer,
+    model_kwargs={"torch_dtype": torch.bfloat16},
+    device_map="auto"
+)
 
+def llama_generate(messages, temperature=0.7, max_tokens=600):
+    # messages: list of {"role":..., "content":...}
+    # Use chat template for prompt formatting
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=True
+    )
+    # Move all tensors to the model's device
+    inputs = {k: v.to(llama_pipeline.model.device) for k, v in inputs.items()}
+    outputs = llama_pipeline.model.generate(
+        input_ids=inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
+        max_new_tokens=max_tokens,
+        do_sample=True,
+        temperature=temperature,
+        top_p=0.9,
+        pad_token_id=tokenizer.eos_token_id,  # Explicitly set pad_token_id
+        eos_token_id=[tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|eot_id|>")]
+    )
+    response = outputs[0][inputs["input_ids"].shape[-1]:]
+    return tokenizer.decode(response, skip_special_tokens=True)
+
+# === Dataset class (unchanged) ===
 class MAGDiDataset(Dataset):
     """
     Dataset for training SocraticMAGDi with variable-length lists for each example.
@@ -262,124 +295,87 @@ class MAGDiDataset(Dataset):
             ],
             "graph": example["graph"]
         }
-
-def generate_analysis(agent, prompt, client, debate_round=0):
-    """Generate analysis from an agent using OpenAI API"""
-    base_temp = agent.get('temperature', 0.7)  # Default to 0.7 if not specified
-
-    # Optional: Still apply debate round scaling if desired
-    temp = base_temp * (1 + 0.1 * debate_round)  # Increase temp in later rounds
+# === Llama-based agent analysis ===
+def generate_analysis(agent, prompt, debate_round=0):
+    base_temp = agent.get('temperature', 0.7)
+    temp = base_temp * (1 + 0.1 * debate_round)
     messages = [
         {"role": "system", "content": agent['instructions']},
         {"role": "user", "content": prompt}
     ]
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=messages,
-        temperature=temp,
-        max_tokens=600
-    )
-    return response.choices[0].message.content.strip()
-
+    response = llama_generate(messages, temperature=temp, max_tokens=600)
+    return response.strip()
 
 def parse_json_response(response):
-    """Parse JSON response, handling errors gracefully"""
     try:
         return json.loads(response)
     except Exception:
         return {"analysis": response, "decision": None, "influenced_by": []}
 
-
-def train_agent_weights(agents, training_data, client):
-    """Train agent weights based on performance on training data"""
+def train_agent_weights(agents, training_data):
     print("Training agent weights")
-
-    # Reset metrics
     for agent in agents:
         agent['accuracy'] = 0.0
         agent['correct_count'] = 0
         agent['total_count'] = 0
-
-    # Evaluate each agent on training data
     for item in tqdm(training_data, desc="Training agents"):
-        print(item)
         question = item['question']
-        print(question)
         correct_answer = str(item['answerKey'])
         options = item.get('options', [])
-        print(options)
-
         for agent in agents:
             prompt = (
-                f"<System Protocol>DO NOT INCLUDE REASONING IN OUTPUT</System>\n\n"
-                f"{question}{options}\n\n"
-                f"<Analysis Steps (INTERNAL USE ONLY)>\n"
-                f"1. Surface assumptions → 2. Verify facts → 3. Generate alternatives → 4. Validate\n\n"
-                f"<Output Requirements>\n"
-                f"- Start with '{{' and end with '}}'\n"
-                f"- No surrounding text or analysis steps\n\n"
-                f"{agent['instructions']}\n\n"
-                f"<BAD Example>DO NOT OUTPUT LIKE THIS:\n"
-                f"'First, I considered...' {{\"decision\":...}}\n"
-            )
+                f"""You are a {agent['role']}. Answer this question using your specialized expertise.
 
-            response = generate_analysis(agent, prompt, client)
+                Question: {question}
+
+                Instructions: 
+                - Apply your {agent['role']}'s unique methodology and analytical framework
+                - Use the specific reasoning approaches defined in your role instructions
+                - Provide your final answer as either 0: {options[0]}, 1: {options[1]}, 2: {options[2]}, 3: {options[3]}
+                - Follow your role's JSON response format
+
+                {agent['instructions']}
+
+                Response:"""
+            )
+            response = generate_analysis(agent, prompt)
             print(response)
             parsed = parse_json_response(response)
             decision = parsed.get("decision", "")
-
-            # Update accuracy metrics
-            agent['total_count'] += 1
             print(decision)
             print(correct_answer)
+            agent['total_count'] += 1
             if decision == correct_answer:
                 agent['correct_count'] += 1
-
-    # Calculate final accuracy and weights
     total_accuracy = 0
     for agent in agents:
         if agent['total_count'] > 0:
             agent['accuracy'] = agent['correct_count'] / agent['total_count']
         else:
             agent['accuracy'] = 0
-
-        # Ensure minimum weight of 0.1 to prevent complete exclusion
         agent['weight'] = max(0.1, agent['accuracy'])
         total_accuracy += agent['accuracy']
-
-    # Normalize weights if we have any accuracy
     if total_accuracy > 0:
         weight_sum = sum(agent['weight'] for agent in agents)
         for agent in agents:
             agent['weight'] = agent['weight'] / weight_sum
     else:
-        # Equal weights if no accuracy data
         for agent in agents:
             agent['weight'] = 1.0 / len(agents)
-
-    # Print results
     print("Agent Training Results:")
     for agent in agents:
         print(f"{agent['role']}: Accuracy = {agent['accuracy']:.4f}, Weight = {agent['weight']:.4f}")
-
     return agents
 
-
 def track_influence(agents):
-    """Track which agents influenced others based on the 'influenced_by' field"""
     influence_counts = {agent['id']: 0 for agent in agents}
-
     for agent in agents:
         if len(agent['analysis']) < 2:
             continue
-
         try:
             parsed = parse_json_response(agent['analysis'][-1])
             influenced_by = parsed.get("influenced_by", "")
-
-            # Parse influenced_by field
             if isinstance(influenced_by, str):
-                # Look for role names in the string
                 for other_agent in agents:
                     if other_agent['role'].lower() in influenced_by.lower():
                         influence_counts[other_agent['id']] += 1
@@ -390,35 +386,17 @@ def track_influence(agents):
                             influence_counts[other_agent['id']] += 1
         except Exception:
             continue
-
-    # Update influence scores
-    total_influences = sum(influence_counts.values()) or 1  # Avoid division by zero
+    total_influences = sum(influence_counts.values()) or 1
     for agent in agents:
         agent['influence_score'] = influence_counts[agent['id']] / total_influences
-
     return influence_counts
 
-
 def create_debate_graph(agents, question, gold_answer=None, decision=None, is_correct=None):
-    """
-    Create a debate graph (MAG) with ground truth and correctness annotations.
-    Each response node records if its decision matches the gold answer.
-    """
     G = nx.DiGraph()
-
-    # 1. Add question node
     G.add_node("question", content=question, type="question", round=-1)
-
-    # 2. Add ground truth node and link it to the question
     if gold_answer is not None:
-        G.add_node(
-            "ground_truth",
-            content=gold_answer,
-            type="ground_truth"
-        )
+        G.add_node("ground_truth", content=gold_answer, type="ground_truth")
         G.add_edge("question", "ground_truth", type="has_ground_truth")
-
-    # 3. Add each agent's responses and debate rounds
     max_rounds = max(len(a['analysis']) for a in agents)
     for agent in agents:
         role = agent['role']
@@ -426,11 +404,7 @@ def create_debate_graph(agents, question, gold_answer=None, decision=None, is_co
             node_id = f"{role}_{round_num}"
             parsed = parse_json_response(response)
             decision = (parsed.get("decision") or "").strip().lower()
-
-            # Determine correctness against gold answer
             is_correct = (decision == gold_answer.strip().lower()) if gold_answer else None
-
-            # Create node with correctness annotation
             G.add_node(
                 node_id,
                 content=response,
@@ -441,15 +415,11 @@ def create_debate_graph(agents, question, gold_answer=None, decision=None, is_co
                 is_correct=is_correct,
                 gold_answer=gold_answer
             )
-
-            # Connect to question or previous round
             if round_num == 0:
                 G.add_edge("question", node_id, type="responds_to")
             else:
                 prev_node = f"{role}_{round_num - 1}"
                 G.add_edge(prev_node, node_id, type="continues")
-
-            # 4. Add weighted influences edges
             influencers = parsed.get("influenced_by", [])
             if isinstance(influencers, str):
                 influencers = [influencers]
@@ -468,29 +438,19 @@ def create_debate_graph(agents, question, gold_answer=None, decision=None, is_co
     for src, dst, data in G.edges(data=True):
         if data.get('type') in ['continues', 'influences']:
             edges_to_add.append((dst, src, data))
-
-    # Add the reverse edges
     for dst, src, data in edges_to_add:
         G.add_edge(dst, src, **data)
     return G
 
-
 def has_consensus(agents):
-    """
-    Returns (True, decision) if every agent's last decision matches,
-    else (False, None). Handles missing or malformed JSON.
-    """
     decisions = []
-
     for ag in agents:
         raw = ag['analysis'][-1]
-        # 1) Try JSON parsing
         try:
             parsed = parse_json_response(raw)
             decision = parsed.get("decision", "")
         except Exception:
             decision = ""
-        # 2) Fallback regex if JSON failed or key absent
         if not decision:
             m = re.search(r'"decision"\s*:\s*"([^"]+)"', raw)
             decision = m.group(1) if m else ""
@@ -498,31 +458,22 @@ def has_consensus(agents):
         if not norm:
             return False, None
         decisions.append(norm)
-
-    # 3) Check unanimous agreement
     counts = Counter(decisions)
     if len(counts) == 1:
         return True, decisions[0]
     return False, None
 
-
 def layered_consensus_process(
         question,
         agents,
-        client,
         base_options,
         gold_answer
 ):
-    """Run the multi-agent debate process with weighted consensus and ground truth comparison"""
     discussion_history = []
     discussion_history.append(f"GOLD_ANSWER: {gold_answer}")
     print("=== INITIAL ROUND ===")
-
-    # Reset agent analysis for new question
     for agent in agents:
         agent['analysis'] = []
-
-    # Initial responses
     for agent in agents:
         prompt = (
             f"<System Protocol>DO NOT INCLUDE REASONING IN OUTPUT</System>\n\n"
@@ -536,34 +487,26 @@ def layered_consensus_process(
             f"<BAD Example>DO NOT OUTPUT LIKE THIS:\n"
             f"'First, I considered...' {{\"decision\":...}}\n"
         )
-
-        response = generate_analysis(agent, prompt, client)
+        response = generate_analysis(agent, prompt)
         agent['analysis'] = [response]
         discussion_history.append(f"INITIAL - {agent['role']}:\n{response}")
         print(f"[{agent['role']} INITIAL]\n{response}")
-
-    # Check initial consensus
     consensus, decision = has_consensus(agents)
     if consensus:
         print(f"Consensus reached on '{decision}' in initial round")
         is_correct = (decision == gold_answer.strip().lower()) if gold_answer else None
         discussion_history.append(f"CONSENSUS_CORRECT: {is_correct}")
         return discussion_history, create_debate_graph(agents, question, gold_answer, decision, is_correct)
-
-    # Debate rounds with temperature escalation
     for round_num in range(2):
         print(f"=== DEBATE ROUND {round_num + 1} ===")
         for i, agent in enumerate(agents):
-            # Include precalculated agent weights with their analyses (excluding current agent)
             others = "\n".join([
                 f"{other['role']} (Weight: {other['weight']:.3f}): {parse_json_response(other['analysis'][-1]).get('analysis', 'No analysis available')}"
-                for j, other in enumerate(agents) if j != i  # Excludes current agent's own analysis
+                for j, other in enumerate(agents) if j != i
             ])
-
             prompt = (
                 f"Peer Analyses (with credibility weights):\n{others}\n\n"
                 "Re-evaluate through your professional lens using:\n\n"
-
                 "1. **Weighted Perspective Integration**\n"
                 "   a. Calculate argument credibility using:\n"
                 "      - Source weight * {role}_relevance_score\n"
@@ -571,7 +514,6 @@ def layered_consensus_process(
                 "   b. For high-weight peers (>0.6):\n"
                 "      - Apply {role}_counteranalysis protocol\n"
                 "      - Require 3x evidence verification\n\n"
-
                 "2. **Persona-Centric Revision**\n"
                 "   a. If changing decision:\n"
                 "      - Must pass {core_principles}_checklist\n"
@@ -579,7 +521,6 @@ def layered_consensus_process(
                 "   b. If keeping decision:\n"
                 "      - Incorporate 1+ valid peer insight\n"
                 "      - Strengthen with {role}_specific_evidence\n\n"
-
                 "3. **Influence Documentation**\n"
                 "   a. **Mandatory Field** - You MUST credit at least 2 peers using:\n"
                 "      - Roles that passed {role}_verification_threshold\n"
@@ -587,27 +528,21 @@ def layered_consensus_process(
                 "   b. **Validation Protocol**\n"
                 "      - Responses WITHOUT 'influenced_by' will be considered invalid\n"
                 "      - Cite 1-3 roles using exact role names from peer analyses\n"
-                "      - Format EXACTLY as: [\"Role1\", \"Role2\"]\n"
                 "   c. **Example Enforcement**:\n"
                 "      GOOD: \"influenced_by\": [\"Mathematician\", \"Ethicist\"]\n"
                 "      BAD: \"influenced_by\": [] or missing field → REJECTED\n\n"
-
                 "Answer As Follows:"
                 "Response Requirements:\n"
                 "- Use YOUR SPECIFIED RESPONSE FORMAT\n"
                 "- ADD 'influenced_by' field at END\n"
                 "- Maintain original JSON structure\n"
                 f"- Only use specified options: {base_options}\n\n"
-
                 "Begin professional analysis:"
             )
-
-            response = generate_analysis(agent, prompt, client, debate_round=round_num + 1)
+            response = generate_analysis(agent, prompt, debate_round=round_num + 1)
             agent['analysis'].append(response)
             discussion_history.append(f"ROUND {round_num + 1} - {agent['role']}:\n{response}")
             print(f"[{agent['role']} REFINED]\n{response}")
-
-        # Track influence after each round
         influence_counts = track_influence(agents)
         print(f"Influence counts after round {round_num + 1}: {influence_counts}")
         consensus, decision = has_consensus(agents)
@@ -616,15 +551,12 @@ def layered_consensus_process(
             is_correct = (decision == gold_answer) if gold_answer else None
             discussion_history.append(f"CONSENSUS_CORRECT: {is_correct}")
             return discussion_history, create_debate_graph(agents, question, gold_answer, decision, is_correct)
-
-    # --- Weighted-voting fallback if no unanimity reached ---
     vote_totals = defaultdict(float)
     for ag in agents:
         parsed = parse_json_response(ag['analysis'][-1])
         dec = parsed.get("decision")
         if dec:
             vote_totals[dec.strip().lower()] += ag['weight']
-
     if vote_totals:
         final_decision, total = max(vote_totals.items(), key=lambda x: x[1])
         print(f"Weighted vote selects '{final_decision}' ({total:.2f} total weight)")
@@ -634,159 +566,93 @@ def layered_consensus_process(
     else:
         final_decision = None
         is_correct = None
-
     return discussion_history, create_debate_graph(agents, question, gold_answer, final_decision, is_correct)
 
-
 def extract_node_embeddings(graph, model_name="sentence-transformers/all-mpnet-base-v2"):
-    """Extract embeddings for graph nodes using a pretrained model"""
     try:
         from sentence_transformers import SentenceTransformer
         model = SentenceTransformer(model_name)
-
         embeddings = {}
         for node_id in graph.nodes():
             content = graph.nodes[node_id].get('content', '')
             if isinstance(content, str) and content:
                 embeddings[node_id] = model.encode(content)
             else:
-                # Default embedding for nodes without content
                 embeddings[node_id] = np.zeros(model.get_sentence_embedding_dimension())
-
         return embeddings
     except ImportError:
         print("Warning: sentence-transformers not installed. Using random embeddings.")
-        # Fallback to random embeddings
-        dim = 768  # Default embedding dimension
+        dim = 768
         embeddings = {}
         for node_id in graph.nodes():
             embeddings[node_id] = np.random.normal(0, 0.1, dim)
         return embeddings
 
-
 def convert_to_pyg_data(graph, embeddings):
-    """
-    Convert a NetworkX debate graph to PyTorch Geometric Data object,
-    using correctness as node labels (1=correct, 0=incorrect).
-    Adds bidirectional edges for proper message passing.
-    """
-    # Sort nodes for consistent ordering
     node_list = list(graph.nodes())
     node_list = [n for n in node_list if graph.nodes[n].get('type') != 'ground_truth']
-
-    # Build feature matrix X from provided embeddings
     x = []
     for node in node_list:
         emb = embeddings[node] if isinstance(embeddings, dict) else embeddings[node_list.index(node)]
         x.append(emb)
     x = torch.tensor(np.stack(x), dtype=torch.float)
-
-    # Build edge index and edge attributes with bidirectional edges
     edge_index = []
     edge_attr = []
     for src, dst, data in graph.edges(data=True):
         if src in node_list and dst in node_list:
             edge_type = data.get('type', '')
             weight = data.get('weight', 0.0) if edge_type == 'influences' else 0.0
-
-            # Original direction
             edge_index.append([node_list.index(src), node_list.index(dst)])
             edge_attr.append([weight])
-
-            # Reverse direction
             edge_index.append([node_list.index(dst), node_list.index(src)])
             edge_attr.append([weight])
-    # Convert to tensors
-    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous() if edge_index else torch.empty((2, 0),
-                                                                                                            dtype=torch.long)
+    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous() if edge_index else torch.empty((2, 0), dtype=torch.long)
     edge_attr = torch.tensor(edge_attr, dtype=torch.float) if edge_attr else None
-
-    # Labels: 1 if node's decision matches gold, else 0
     y = []
     for node in node_list:
         node_data = graph.nodes[node]
         y.append(1 if node_data.get('is_correct', False) else 0)
     y = torch.tensor(y, dtype=torch.long)
-
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
-
-def create_mag_dataset(training_data, agents, client):
-    """Create a MAG dataset from multiple questions"""
+def create_mag_dataset(training_data, agents):
     mag_dataset = []
-
     for item in tqdm(training_data, desc="Creating MAG dataset"):
-        print(item)
         question = item['question']
-        print(question)
         options = item.get('options', [])
-        print(options)
         gold_answer = str(item['gold_answer'])
-        _, debate_graph = layered_consensus_process(question, agents, client, options, gold_answer)
-
-        # Extract embeddings
+        _, debate_graph = layered_consensus_process(question, agents, options, gold_answer)
         embeddings = extract_node_embeddings(debate_graph)
-
-        # Convert to PyG Data
         pyg_data = convert_to_pyg_data(debate_graph, embeddings)
-
-        # Add to dataset
         mag_dataset.append({
             "question": question,
             "options": options,
             "graph": debate_graph,
             "pyg_data": pyg_data
         })
-
     return mag_dataset
-# Cell: Main Training Function (Jupyter Compatible)
+
 def main():
-    # Configuration Variables (Replace all args with direct variables)
     torch.cuda.empty_cache()
     print(f"CUDA available: {torch.cuda.is_available()}")
     print(f"CUDA device count: {torch.cuda.device_count()}")
     if torch.cuda.is_available():
         print(f"Current CUDA device: {torch.cuda.current_device()}")
     SEED = 42
-    MODEL_SIZE = "small"  # choices: "small", "medium", "large"
-    DECOMPOSER_MODEL = "Qwen/Qwen2-1.5B"
-    SOLVER_MODEL = "Qwen/Qwen2-1.5B"
+    MODEL_SIZE = "small"
     OUTPUT_DIR = "outputs"
-    
-    # GCN Configuration
     GCN_IN_CHANNELS = 768
     GCN_HIDDEN_CHANNELS = 256
     GCN_OUT_CHANNELS = 4
-    
-    # Loss weights
-    ALPHA = 1.0  # Weight for language modeling loss
-    BETA = 1.0   # Weight for node classification loss
-    GAMMA = 0.1  # Weight for contrastive loss
-    DELTA = 0.5  # Weight for decomposer-solver alignment loss
-    
-    # Training configuration
+    ALPHA = 1.0
+    BETA = 1.0
+    GAMMA = 0.1
+    DELTA = 0.5
     NUM_EPOCHS = 5
     BATCH_SIZE = 2
     LEARNING_RATE = 1e-6
-    
-    # OpenAI API Key
-    OPENAI_API_KEY = ENV[‘AUTH_TOKEN’]
-    
     set_seed(SEED)
-
-    # Update model selection based on size
-
-    print(f"Using decomposer model: {DECOMPOSER_MODEL}")
-    print(f"Using solver model: {SOLVER_MODEL}")
-
-    # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    # Initialize OpenAI client
-    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
-    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-    # Initialize agents
     agents = [
         {
             "id": i,
@@ -800,40 +666,28 @@ def main():
             "influence_score": 0.0
         } for i, role in enumerate(role_specifications)
     ]
-
-    # Load dataset
     full_train = load_dataset("cais/mmlu", "all", split = "auxiliary_train")
-    print(full_train[1])
     random_indices = random.sample(range(len(full_train)), 200)
     agent_data= full_train.select(random_indices)
-    #mag_creation_data = subsplits["test"]
-    #print(mag_creation_data)
     print(f"Agent weight set: {len(agent_data)} examples")
-    #print(f"MAG creation set: {len(mag_creation_data)} examples")
-
-    # Train agent weights on agent_data
-    print("Training agent weights using training data")
     training_examples = [
         {"question": item["question"],
          "answerKey": item["answer"],
          "options": item["choices"]}
         for item in agent_data
     ]
-    agents = train_agent_weights(agents, training_examples, client)
-    # Build MAG dataset on mag_creation_data
-    print("Creating MAG dataset from training data")
+    agents = train_agent_weights(agents, training_examples)
+    sys.exit()
     training_data = [
-        {"question": item["question"],
-         "gold_answer": item["answer"],
-         "options": item["choices"]}
+         {"question": item["question"],
+        "gold_answer": item["answer"],
+          "options": item["choices"]}
         for item in mag_creation_data
-    ]
-    mag_dataset = create_mag_dataset(training_data, agents, client)
-
-    # Load the saved MAG dataset from the pickle file
+     ]
+    mag_dataset = create_mag_dataset(training_data, agents)
     os.makedirs("data", exist_ok=True)
     with open("data/mag_dataset.pkl", "wb") as f:
         pickle.dump(mag_dataset, f)
-# Run the training
+
 if __name__ == "__main__":
     main()
