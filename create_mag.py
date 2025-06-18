@@ -92,33 +92,32 @@ Deviation from this format will exclude you from consensus.
 """
     },
 
-    "SocialChangeAdvocate": {
+    "Historian": {
         "temperature": 0.8,
         "instructions": """
-You are a Social Change Advocate. When making decisions:
+You are a Historian. When making decisions:
 
 ALWAYS DO:
-- Project impacts across 10/25/100 year horizons
-- Model power shift dynamics using differential game theory
-- Quantify intersectional disadvantage indices
-- Identify which groups are helped vs. harmed by each option
-- Challenge existing power structures and inequalities
-- Push for solutions that redistribute resources to marginalized communities
-- Question whose voices are missing from the decision-making process
-- Demand accountability mechanisms for those in power
-- Apply intersectionality framework to all analyses
+- Contextualize the issue within relevant historical periods and events
+- Identify historical precedents and analogues for each option
+- Analyze the long-term consequences of similar decisions in the past
+- Examine the roles of key actors, institutions, and social forces in shaping outcomes
+- Assess the reliability and biases of historical sources and narratives
+- Consider the impact of cultural, economic, and technological changes over time
+- Highlight lessons learned from both successes and failures in history
+- Address how collective memory and historiography influence present choices
 - Make Decision based on this
 
-RESPONSE FORMAT(DON'T PUT '''json before this):
+RESPONSE FORMAT (DON'T PUT '''json before this):
 {
   "decision": "<option>",
   "analysis": {
-  "power_impact": "<who gains/loses power>",
-  "equity_assessment": "<effect on marginalized groups>",
-  "temporal_horizons": "<10/25/100 year projections>",
-  "intersectional_analysis": "<multi-dimensional disadvantage assessment>",
-  "missing_voices": "<excluded stakeholders>",
-  "accountability_mechanisms": "<power oversight structures>"
+    "historical_context": "<relevant eras, events, or trends>",
+    "precedents": "<similar decisions and their outcomes>",
+    "key_actors": "<influential individuals, groups, or institutions>",
+    "source_critique": "<assessment of historical evidence reliability>",
+    "long_term_consequences": "<impacts observed over decades/centuries>",
+    "historiographical_issues": "<how history is remembered/interpreted>"
   }
 }
 
@@ -476,17 +475,20 @@ def layered_consensus_process(
         agent['analysis'] = []
     for agent in agents:
         prompt = (
-            f"<System Protocol>DO NOT INCLUDE REASONING IN OUTPUT</System>\n\n"
-            f"{question}{base_options}\n\n"
-            f"<Analysis Steps (INTERNAL USE ONLY)>\n"
-            f"1. Surface assumptions → 2. Verify facts → 3. Generate alternatives → 4. Validate\n\n"
-            f"<Output Requirements>\n"
-            f"- Start with '{{' and end with '}}'\n"
-            f"- No surrounding text or analysis steps\n\n"
-            f"{agent['instructions']}\n\n"
-            f"<BAD Example>DO NOT OUTPUT LIKE THIS:\n"
-            f"'First, I considered...' {{\"decision\":...}}\n"
-        )
+                f"""You are a {agent['role']}. Answer this question using your specialized expertise.
+
+                Question: {question}
+
+                Instructions: 
+                - Apply your {agent['role']}'s unique methodology and analytical framework
+                - Use the specific reasoning approaches defined in your role instructions
+                - Provide your final answer as either True or False
+                - Follow your role's JSON response format
+
+                {agent['instructions']}
+
+                Response:"""
+            )
         response = generate_analysis(agent, prompt)
         agent['analysis'] = [response]
         discussion_history.append(f"INITIAL - {agent['role']}:\n{response}")
@@ -495,9 +497,10 @@ def layered_consensus_process(
     if consensus:
         print(f"Consensus reached on '{decision}' in initial round")
         is_correct = (decision == gold_answer.strip().lower()) if gold_answer else None
+        print(is_correct)
         discussion_history.append(f"CONSENSUS_CORRECT: {is_correct}")
         return discussion_history, create_debate_graph(agents, question, gold_answer, decision, is_correct)
-    for round_num in range(2):
+    for round_num in range(3):
         print(f"=== DEBATE ROUND {round_num + 1} ===")
         for i, agent in enumerate(agents):
             others = "\n".join([
@@ -505,39 +508,39 @@ def layered_consensus_process(
                 for j, other in enumerate(agents) if j != i
             ])
             prompt = (
-                f"Peer Analyses (with credibility weights):\n{others}\n\n"
-                "Re-evaluate through your professional lens using:\n\n"
-                "1. **Weighted Perspective Integration**\n"
-                "   a. Calculate argument credibility using:\n"
-                "      - Source weight * {role}_relevance_score\n"
-                "      - Minimum 2 conflicting perspectives must be preserved\n"
-                "   b. For high-weight peers (>0.6):\n"
-                "      - Apply {role}_counteranalysis protocol\n"
-                "      - Require 3x evidence verification\n\n"
-                "2. **Persona-Centric Revision**\n"
-                "   a. If changing decision:\n"
-                "      - Must pass {core_principles}_checklist\n"
-                "      - Show direct alignment with 2+ {role}_decision_factors\n"
-                "   b. If keeping decision:\n"
-                "      - Incorporate 1+ valid peer insight\n"
-                "      - Strengthen with {role}_specific_evidence\n\n"
-                "3. **Influence Documentation**\n"
-                "   a. **Mandatory Field** - You MUST credit at least 2 peers using:\n"
-                "      - Roles that passed {role}_verification_threshold\n"
-                "      - Roles providing novel {domain}_insights\n"
-                "   b. **Validation Protocol**\n"
-                "      - Responses WITHOUT 'influenced_by' will be considered invalid\n"
-                "      - Cite 1-3 roles using exact role names from peer analyses\n"
-                "   c. **Example Enforcement**:\n"
-                "      GOOD: \"influenced_by\": [\"Mathematician\", \"Ethicist\"]\n"
-                "      BAD: \"influenced_by\": [] or missing field → REJECTED\n\n"
-                "Answer As Follows:"
-                "Response Requirements:\n"
-                "- Use YOUR SPECIFIED RESPONSE FORMAT\n"
-                "- ADD 'influenced_by' field at END\n"
-                "- Maintain original JSON structure\n"
-                f"- Only use specified options: {base_options}\n\n"
-                "Begin professional analysis:"
+                f"**ORIGINAL QUESTION:** {question}\n\n"
+
+                f"Here are the analyses from other agents:\n{others}\n\n"
+
+                "**Your Task:** Critically evaluate these arguments and re-examine the original question.\n\n"
+
+                "1. **Revisit the Original Question:** First, remember what we're actually trying to solve. Has the discussion stayed on track?\n"
+
+                "2. **Evaluate Argument Validity:** For each agent's position, think:\n"
+                "   - Are their claims supported by evidence or reasoning?\n"
+                "   - Do they address the core question or tangential issues?\n"
+                "   - What assumptions are they making?\n"
+                "   - Where might their logic be flawed or incomplete?\n\n"
+
+                "3. **Apply Your Expertise:** Use your role's unique perspective to:\n"
+                "   - Identify what others might have missed\n"
+                "   - Challenge weak arguments regardless of who made them\n"
+                "   - Contribute insights specific to your domain\n\n"
+
+                "4. **State Your Final Position:** Based on argument quality (not agent authority):\n"
+                "   - What is your answer to the ORIGINAL question?\n"
+                "   - Which arguments were most compelling and why?\n"
+                "   - What new considerations does your analysis reveal?\n\n"
+
+                "5. **Credit Valid Influences (Mandatory):** Your response MUST include:\n"
+                "   - `influenced_by`: List agents whose ARGUMENTS (not status) genuinely changed your thinking\n"
+
+                'Example format:\n'
+                '"influenced_by": ["Agent whose evidence was compelling"]\n'
+                
+                "**Remember:** Your goal is to find the best answer to the original question, not to defer to popular opinion or high-status agents.\n\n"
+
+                "Begin your critical analysis:"
             )
             response = generate_analysis(agent, prompt, debate_round=round_num + 1)
             agent['analysis'].append(response)
@@ -548,7 +551,10 @@ def layered_consensus_process(
         consensus, decision = has_consensus(agents)
         if consensus:
             print(f"Consensus reached on '{decision}' at round {round_num + 1}")
+            decision = str(decision)
+            gold_answer = str(gold_answer)
             is_correct = (decision == gold_answer) if gold_answer else None
+            print(is_correct)
             discussion_history.append(f"CONSENSUS_CORRECT: {is_correct}")
             return discussion_history, create_debate_graph(agents, question, gold_answer, decision, is_correct)
     vote_totals = defaultdict(float)
@@ -666,24 +672,24 @@ def main():
             "influence_score": 0.0
         } for i, role in enumerate(role_specifications)
     ]
-    full_train = load_dataset("cais/mmlu", "all", split = "auxiliary_train")
-    random_indices = random.sample(range(len(full_train)), 200)
-    agent_data= full_train.select(random_indices)
-    print(f"Agent weight set: {len(agent_data)} examples")
-    training_examples = [
-        {"question": item["question"],
-         "answerKey": item["answer"],
-         "options": item["choices"]}
-        for item in agent_data
-    ]
-    agents = train_agent_weights(agents, training_examples)
-    sys.exit()
+    full_train = load_dataset("wics/strategy-qa", split = "test")
+    subsplits = full_train.train_test_split(test_size=.9, seed=42)
+    mag_creation_data = subsplits["test"]
+    #print(f"Agent weight set: {len(agent_data)} examples")
+    #training_examples = [
+    #    {"question": item["question"],
+    #     "answerKey": item["answer"],
+    #     "options": item["choices"]}
+    #    for item in agent_data
+    #]
+    #agents = train_agent_weights(agents, training_examples)
+    print(mag_creation_data[0])
     training_data = [
-         {"question": item["question"],
-        "gold_answer": item["answer"],
-          "options": item["choices"]}
+        {"question": item["question"],
+         "gold_answer": item["answer"],
+         "options": ["True", "False"]}
         for item in mag_creation_data
-     ]
+    ]
     mag_dataset = create_mag_dataset(training_data, agents)
     os.makedirs("data", exist_ok=True)
     with open("data/mag_dataset.pkl", "wb") as f:
