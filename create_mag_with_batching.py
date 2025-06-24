@@ -655,30 +655,22 @@ def layered_consensus_process(question, agents, base_options, gold_answer):
             ])
             
             prompt = (
-                f"**ORIGINAL QUESTION:** {question}\n\n"
-                f"Here are the analyses from other agents:\n{others}\n\n"
-                "**Your Task:** Critically evaluate these arguments and re-examine the original question.\n\n"
-                "1. **Revisit the Original Question:** First, remember what we're actually trying to solve. Has the discussion stayed on track?\n"
-                "2. **Evaluate Argument Validity:** For each agent's position, think:\n"
-                "   - Are their claims supported by evidence or reasoning?\n"
-                "   - Do they address the core question or tangential issues?\n"
-                "   - What assumptions are they making?\n"
-                "   - Where might their logic be flawed or incomplete?\n\n"
-                "3. **Apply Your Expertise:** Use your role's unique perspective to:\n"
-                "   - Identify what others might have missed\n"
-                "   - Challenge weak arguments regardless of who made them\n"
-                "   - Contribute insights specific to your domain\n\n"
-                "4. **State Your Final Position:** Based on argument quality (not agent authority):\n"
-                "   - What is your answer to the ORIGINAL question?\n"
-                "   - Which arguments were most compelling and why?\n"
-                "   - What new considerations does your analysis reveal?\n\n"
-                "5. **Credit Valid Influences (Mandatory):** Your response MUST include:\n"
-                "   - `influenced_by`: List agents whose ARGUMENTS (not status) genuinely changed your thinking\n"
-                'Example format:\n'
-                '"influenced_by": ["Agent whose evidence was compelling"]\n'
-                "**Remember:** Your goal is to find the best answer to the original question, not to defer to popular opinion or high-status agents.\n\n"
-                "Begin your critical analysis:"
-            )
+            f"""You are a {agent['role']}. Answer this question using your specialized expertise, and considering the other analyses {others}.
+
+            Question: {question}
+
+            Instructions: 
+            - Apply your {agent['role']}'s unique methodology and analytical framework
+            - Use the specific reasoning approaches defined in your role instructions
+            - Provide your final answer as either True or False
+            - Follow your role's JSON response format
+
+            {agent['instructions']}
+
+            Response:"""
+        )
+
+
             debate_prompts.append(prompt)
         
         # Generate debate responses in batch
@@ -697,8 +689,10 @@ def layered_consensus_process(question, agents, base_options, gold_answer):
         consensus, decision = has_consensus(agents)
         if consensus:
             print(f"Consensus reached on '{decision}' at round {round_num + 1}")
-            decision = str(decision)
-            gold_answer = str(gold_answer)
+            decision = str(decision).lower()
+            print(decision)
+            gold_answer = str(gold_answer).lower()
+            print(gold_answer)
             is_correct = (decision == gold_answer) if gold_answer else None
             print(f"Is correct: {is_correct}")
             discussion_history.append(f"CONSENSUS_CORRECT: {is_correct}")
@@ -869,11 +863,9 @@ def main():
          "options": ["True", "False"]}
         for item in mag_creation_data
     ]
+    mag_dataset = create_mag_dataset(training_data, agents)
     
     print("Creating MAG dataset with batch processing...")
-    
-    # Create dataset with batch-optimized processing
-    mag_dataset = create_mag_dataset(training_data, agents)
     
     # Save dataset
     os.makedirs("data", exist_ok=True)
