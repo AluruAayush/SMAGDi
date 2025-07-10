@@ -16,7 +16,6 @@ from transformers import (
     TrainingArguments,
     set_seed
 )
-import openai
 
 #from smodel import SocraticMAGDi, SocraticMAGDiDataCollator
 from datasets import load_dataset
@@ -29,6 +28,55 @@ import sklearn
 from transformers import EarlyStoppingCallback
 from transformers import IntervalStrategy
 
+class MAGDiDataset(Dataset):
+    """
+    Dataset for training SocraticMAGDi with variable-length lists for each example.
+    """
+    def __init__(self, examples):
+        self.examples = examples
+
+    def __len__(self):
+        return len(self.examples)
+
+    def __getitem__(self, idx):
+        example = self.examples[idx]
+        return {
+            "decomposer": [
+                {
+                    "prompt_input_ids": d["prompt_input_ids"],
+                    "prompt_attention_mask": d["prompt_attention_mask"],
+                    "completion_input_ids": d["completion_input_ids"],
+                    "completion_attention_mask": d.get("completion_attention_mask", None)
+                }
+                for d in example["decomposer"]
+            ],
+            "solver": [
+                {
+                    "prompt_input_ids": s["prompt_input_ids"],
+                    "prompt_attention_mask": s["prompt_attention_mask"],
+                    "completion_input_ids": s["completion_input_ids"],
+                    "completion_attention_mask": s.get("completion_attention_mask", None)
+                }
+                for s in example["solver"]
+            ],
+            "pos": [
+                {
+                    "input_ids": p["input_ids"],
+                    "attention_mask": p["attention_mask"],
+                    "labels": p["labels"]
+                }
+                for p in example["pos"]
+            ],
+            "neg": [
+                {
+                    "input_ids": n["input_ids"],
+                    "attention_mask": n["attention_mask"],
+                    "labels": n["labels"]
+                }
+                for n in example["neg"]
+            ],
+            "graph": example["graph"]
+        }
 class SocraticMAGDiTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         outputs = model(
@@ -246,8 +294,8 @@ def main():
         print(f"Current CUDA device: {torch.cuda.current_device()}")
     SEED = 42
     MODEL_SIZE = "small"  # choices: "small", "medium", "large"
-    DECOMPOSER_MODEL = "Qwen/Qwen2-1.5B"
-    SOLVER_MODEL = "Qwen/Qwen2-1.5B"
+    DECOMPOSER_MODEL = "meta-llama/Llama-3.2-3B"
+    SOLVER_MODEL = "meta-llama/Llama-3.2-3B"
     OUTPUT_DIR = "outputs"
     
     # GCN Configuration
@@ -266,40 +314,16 @@ def main():
     BATCH_SIZE = 1
     LEARNING_RATE = 1e-5
     
-    # OpenAI API Key
-    OPENAI_API_KEY = ENV[‘AUTH_TOKEN’]
-    
+    # OpenAI API Key    
     set_seed(SEED)
     # Load the saved MAG dataset from the pickle file
-    with open('mag_dataset_new.pkl', 'rb') as f:
+    with open('data/mag_dataset_refined.pkl', 'rb') as f:
         mag_dataset = pickle.load(f)
-
-    # Process dataset items
-    for item in mag_dataset:
-        graph = item["graph"]
-        gold_answer = None
-        final_decision = None
-        max_round = -1
-
-        # Extract gold_answer from any response node
-        for node_id, node_data in graph.nodes(data=True):
-            if node_data.get('type') in ['response', 'initial_response']:
-                if node_data.get('gold_answer'):
-                    gold_answer = str(node_data['gold_answer']).strip().lower()
-                    break
-
-        # Find the final consensus decision (latest round)
-        for node_id, node_data in graph.nodes(data=True):
-            if node_data.get('type') in ['response', 'initial_response']:
-                round_num = node_data.get('round', 0)
-                if round_num > max_round:
-                    max_round = round_num
-                    final_decision = node_data.get('decision', '').strip().lower()
-
-        # Add fields to item
-        item['gold_answer'] = gold_answer
-        item['final_decision'] = final_decision
-        item['is_correct'] = (final_decision == gold_answer) if final_decision and gold_answer else False
+        
+    for i in range(len(mag_dataset)):
+        if mag_dataset[i]["is_correct"] == None:
+            mag_dataset.drop(i)
+        
 
     # Split MAG dataset into train/val
     from sklearn.model_selection import train_test_split
@@ -361,7 +385,7 @@ def main():
     from transformers import TrainingArguments
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
-        num_train_epochs=10,
+        num_train_epochs=8,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=32,
         learning_rate=LEARNING_RATE,
@@ -392,7 +416,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=val_dataset,  # <-- Validation set here
         data_collator=SocraticMAGDiDataCollator(tokenizer),
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=4)]
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
     )
 
     # Train model
@@ -429,24 +453,6 @@ def main():
 
     # Save tokenizer
     tokenizer.save_pretrained(final_dir)
-
-    # Save training metadata
-    training_metadata = {
-        "training_args": {
-            "num_epochs": NUM_EPOCHS,
-            "batch_size": BATCH_SIZE,
-            "learning_rate": LEARNING_RATE,
-            "use_lora": False
-        },
-        "dataset_info": {
-            "num_examples": len(train_dataset),
-            "num_mag_graphs": len(mag_train)
-        },
-        "agent_weights": {agent["role"]: agent["weight"] for agent in agents}
-    }
-
-    with open(os.path.join(final_dir, "training_info.json"), "w") as f:
-        json.dump(training_metadata, f, indent=2)
 
     # Save individual component states
     components_dir = os.path.join(final_dir, "components")
