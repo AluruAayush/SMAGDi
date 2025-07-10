@@ -666,7 +666,7 @@ def layered_consensus_process(question, agents, base_options, gold_answer):
         loss.backward()
         optimizer.step()
 
-        return discussion_history, create_debate_graph(agents, question, gold_answer, decision, is_correct)
+        return discussion_history, decision, is_correct, gold_answer, create_debate_graph(agents, question, gold_answer, decision, is_correct)
     
     for round_num in range(3):
         print(f"=== DEBATE ROUND {round_num + 1} (BATCHED) ===")
@@ -726,7 +726,7 @@ def layered_consensus_process(question, agents, base_options, gold_answer):
             loss.backward()
             optimizer.step()
 
-            return discussion_history, create_debate_graph(agents, question, gold_answer, decision, is_correct)
+            return discussion_history, decision, is_correct, gold_answer, create_debate_graph(agents, question, gold_answer, decision, is_correct)
     
     vote_totals = defaultdict(float)
     for ag in agents:
@@ -736,10 +736,10 @@ def layered_consensus_process(question, agents, base_options, gold_answer):
             vote_totals[dec.strip().lower()] += ag['weight']
     
     if vote_totals:
-        final_decision, total = max(vote_totals.items(), key=lambda x: x[1])
-        print(f"Weighted vote selects '{final_decision}' ({total:.2f} total weight)")
-        discussion_history.append(f"WEIGHTED_VOTE: {final_decision}")
-        is_correct = (final_decision == gold_answer.strip().lower()) if gold_answer else None
+        decision, total = max(vote_totals.items(), key=lambda x: x[1])
+        print(f"Weighted vote selects '{decision}' ({total:.2f} total weight)")
+        discussion_history.append(f"WEIGHTED_VOTE: {decision}")
+        is_correct = (decision == gold_answer.strip().lower()) if gold_answer else None
         discussion_history.append(f"WEIGHTED_VOTE_CORRECT: {is_correct}")
 
         teacher_input = tokenizer(question, return_tensors="pt").to(device)
@@ -755,10 +755,10 @@ def layered_consensus_process(question, agents, base_options, gold_answer):
         loss.backward()
         optimizer.step()
     else:
-        final_decision = None
+        decision = None
         is_correct = None
     
-    return discussion_history, create_debate_graph(agents, question, gold_answer, final_decision, is_correct)
+    return discussion_history, decision, is_correct, gold_answer, create_debate_graph(agents, question, gold_answer, decision, is_correct)
 def extract_node_embeddings(graph, model_name="sentence-transformers/all-mpnet-base-v2"):
     try:
         from sentence_transformers import SentenceTransformer
@@ -826,7 +826,7 @@ def create_mag_dataset(training_data, agents, batch_size=1):
             gold_answer = str(item['gold_answer'])
             
             # The layered_consensus_process now uses batch inference internally
-            _, debate_graph = layered_consensus_process(question, agents, options, gold_answer)
+            _, decision, is_correct, gold_answer, debate_graph = layered_consensus_process(question, agents, options, gold_answer)
             embeddings = extract_node_embeddings(debate_graph)
             pyg_data = convert_to_pyg_data(debate_graph, embeddings)
             
@@ -834,7 +834,10 @@ def create_mag_dataset(training_data, agents, batch_size=1):
                 "question": question,
                 "options": options,
                 "graph": debate_graph,
-                "pyg_data": pyg_data
+                "pyg_data": pyg_data,
+                "final_decision": decision,
+                "is_correct": is_correct,
+                "gold_answer": gold_answer
             })
     
     return mag_dataset
