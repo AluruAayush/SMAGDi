@@ -1,3 +1,33 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import torch.nn.functional as F
+import numpy as np
+
+class StudentModel(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(StudentModel, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 256)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(256, output_dim)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        return self.fc2(x)
+
+class TeacherModel(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(TeacherModel, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 512)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(512, output_dim)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        return self.fc2(x)
 class ModifiedDeepNNCosine(nn.Module):
     def __init__(self, num_classes=10):
         super(ModifiedDeepNNCosine, self).__init__()
