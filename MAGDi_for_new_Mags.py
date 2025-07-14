@@ -81,7 +81,7 @@ class MAGDiDataCollator:
         return batch
 
 # 5. Tokenizer and Model Setup (Llama 3.1/3B-Instruct)
-model_name = "meta-llama/Meta-Llama-3-3B-Instruct"
+model_name = "meta-llama/Llama-3.2-3B
 tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left", add_eos_token=True)
 tokenizer.pad_token_id = tokenizer.eos_token_id
 
