@@ -107,7 +107,7 @@ Respond with your reasoning and final answer.
 SEED = 42
 set_seed(SEED)
 LLAMA_TEACHER = "meta-llama/Meta-Llama-3.1-8B-Instruct"
-LLAMA_STUDENT = "meta-llama/Meta-Llama-3.2-8B-Instruct"
+LLAMA_STUDENT = "meta-llama/Llama-3.2-3B"
 TEMPERATURE = 4.0  # Temperature for softening logits[57]
 ALPHA = 0.7  # Weight for distillation loss vs hard target loss[62]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -152,7 +152,7 @@ def extract_logits_from_persona(role, question, options):
     # Forward pass to get logits
     with torch.no_grad():
         outputs = teacher_models[role](**inputs)
-        logits = outputs.logits[0, -1, :]  # Get logits for last token
+        logits = outputs.logits[0, -1, :].to(torch.float32)  # Get logits for last token
     
     # Get logits for answer tokens (0, 1, 2, 3, etc.)
     answer_tokens = []
