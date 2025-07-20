@@ -110,13 +110,14 @@ LLAMA_TEACHER = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 LLAMA_STUDENT = "meta-llama/Llama-3.2-3B"
 TEMPERATURE = 4.0  # Temperature for softening logits
 ALPHA = 0.7        # Weight for distillation loss vs hard target loss
+MAX_LENGTH = 512   # Define max length globally for consistency
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Function to clear GPU memory
 def clear_gpu_memory():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        print("GPU memory cleared.")
+        # print("GPU memory cleared.") # Commented out to reduce console noise
     else:
         print("No GPU available.")
 
@@ -126,7 +127,7 @@ tokenizer = AutoTokenizer.from_pretrained(LLAMA_TEACHER, padding_side="left")
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
-# Load a single teacher model
+# Load teacher model
 teacher_model = AutoModelForCausalLM.from_pretrained(
     LLAMA_TEACHER,
     torch_dtype=torch.bfloat16,
@@ -150,13 +151,12 @@ def generate_persona_response(spec, question, options):
 
 def aggregate_persona_responses(question, options):
     responses = [generate_persona_response(spec, question, options) for spec in role_specifications.values()]
-    # Simple aggregation: concatenate responses
     aggregated_response = "\n\n".join(responses)
     return aggregated_response
 
 # === Dataset Preparation ===
 class DistillationDataset(Dataset):
-    def __init__(self, data, tokenizer, max_length=512):
+    def __init__(self, data, tokenizer, max_length=MAX_LENGTH):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -173,7 +173,6 @@ class DistillationDataset(Dataset):
             max_length=self.max_length,
             return_tensors="pt"
         )
-        # Tokenize teacher response for full-sequence logits
         teacher_encoding = self.tokenizer(
             item["teacher_response"],
             truncation=True,
@@ -184,8 +183,8 @@ class DistillationDataset(Dataset):
         return {
             "input_ids": input_encoding["input_ids"].squeeze(0),
             "attention_mask": input_encoding["attention_mask"].squeeze(0),
-            "teacher_logits": item["teacher_logits"],  # Pre-computed full logits
-            "labels": teacher_encoding["input_ids"].squeeze(0)  # Use teacher response as labels for hard loss
+            "teacher_logits": item["teacher_logits"],  # Pre-computed and padded logits
+            "labels": teacher_encoding["input_ids"].squeeze(0)
         }
 
 # === Distillation Loss Function ===
@@ -194,95 +193,137 @@ class DistillationLoss(nn.Module):
         super().__init__()
         self.alpha = alpha
         self.temperature = temperature
-        self.kl_loss = nn.KLDivLoss(reduction="batchmean")
+        self.kl_loss = nn.KLDivLoss(reduction="batchmean", log_target=False)
         self.ce_loss = nn.CrossEntropyLoss()
 
     def forward(self, student_logits, teacher_logits, labels):
-        # Full-sequence KL divergence
         teacher_probs = F.softmax(teacher_logits / self.temperature, dim=-1)
         student_log_probs = F.log_softmax(student_logits / self.temperature, dim=-1)
+        
         distill_loss = self.kl_loss(student_log_probs.view(-1, student_log_probs.size(-1)),
                                     teacher_probs.view(-1, teacher_probs.size(-1))) * (self.temperature ** 2)
 
-        # Hard-target loss
         hard_loss = self.ce_loss(student_logits.view(-1, student_logits.size(-1)), labels.view(-1))
 
         return self.alpha * distill_loss + (1 - self.alpha) * hard_loss
 
-# === Data Processing ===
+# === Data Processing (Corrected) ===
 def process_dataset():
     print("Loading and processing dataset...")
     dataset = load_dataset("wics/strategy-qa", split="test")
-    dataset = dataset.shuffle(seed=SEED).select(range(500))
+    dataset = dataset.shuffle(seed=SEED)
 
     processed = []
     for ex in tqdm(dataset, desc="Processing examples"):
         q = ex["question"]
         opts = ["True", "False"]
         teacher_response = aggregate_persona_responses(q, opts)
-        # Pre-compute teacher logits for the aggregated response
-        teacher_inputs = tokenizer(teacher_response, return_tensors="pt").to(device)
+
+        # CORRECTED: Apply padding and truncation during tokenization
+        teacher_inputs = tokenizer(
+            teacher_response,
+            return_tensors="pt",
+            truncation=True,
+            padding="max_length",
+            max_length=MAX_LENGTH
+        ).to(device)
+
+        # Now the model receives fixed-size input and produces fixed-size logits
         with torch.no_grad():
             teacher_logits = teacher_model(**teacher_inputs).logits.squeeze(0)
+
         processed.append({
             "input": f"Question: {q}\nAnswer:",
             "teacher_response": teacher_response,
             "teacher_logits": teacher_logits.cpu(),
             "gold_answer": ex["answer"]
         })
-        clear_gpu_memory()  # Clear memory after each example
-    clear_gpu_memory()  # Final clear after loop
+        clear_gpu_memory()
+    clear_gpu_memory()
     return processed
 
-# === Custom Trainer ===
+# === Custom Data Collator (New) ===
+class CustomDistillationCollator(DataCollatorForLanguageModeling):
+    def __call__(self, features):
+        # Default collator handles input_ids, attention_mask, and creates labels
+        collated_batch = super().__call__(features)
+
+        # Manually stack the pre-padded teacher_logits
+        teacher_logits_list = [feature["teacher_logits"] for feature in features]
+        collated_batch["teacher_logits"] = torch.stack(teacher_logits_list)
+
+        return collated_batch
+
+# === Custom Trainer (Corrected) ===
 class DistillationTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         self.distill_loss = DistillationLoss()
         super().__init__(*args, **kwargs)
 
-    def compute_loss(self, model, inputs, num_items_in_batch, return_outputs=False):
-        outputs = model(**inputs)
-        student_logits = outputs.logits
-        # Explicitly move teacher_logits to the same device as student_logits
+    # CORRECTED SIGNATURE
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # The 'inputs' dict now contains correctly batched tensors
+        # Separate inputs for the model forward pass from custom data
+        model_inputs = {
+            "input_ids": inputs["input_ids"],
+            "attention_mask": inputs["attention_mask"]
+        }
+        student_outputs = model(**model_inputs)
+        student_logits = student_outputs.logits
+        
         teacher_logits = inputs["teacher_logits"].to(student_logits.device)
         labels = inputs["labels"]
+        
         loss = self.distill_loss(student_logits, teacher_logits, labels)
-        return (loss, outputs) if return_outputs else loss
+        return (loss, student_outputs) if return_outputs else loss
 
-# === Main Training Function ===
+# === Main Training Function (Corrected) ===
 def main():
     print("Starting multi-agent knowledge distillation...")
     data = process_dataset()
 
     # Split into train/validation
-    split = int(0.8 * len(data))
-    train_data, val_data = data[:split], data[split:]
-
+    if len(data) < 2:
+        # Handle edge case for very small datasets
+        train_data = data
+        val_data = data
+    else:
+        split = int(0.8 * len(data))
+        train_data, val_data = data[:split], data[split:]
+        # Ensure validation set is not empty if there is enough data
+        if not val_data:
+            val_data = train_data 
+            
+    print(f"Training with {len(train_data)} samples, validating with {len(val_data)} samples.")
     train_ds = DistillationDataset(train_data, tokenizer)
     val_ds = DistillationDataset(val_data, tokenizer)
+    
+    # Adjust batch size if dataset is smaller than batch size
+    batch_size = min(4, len(train_data)) if len(train_data) > 0 else 1
 
     training_args = TrainingArguments(
         output_dir="./multi_agent_distilled_student",
         num_train_epochs=3,
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=4,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=2,
-        eval_strategy="steps",
-        eval_steps=100,
-        save_steps=200,
-        save_total_limit=2,
+        eval_strategy="epoch", # Changed from steps to epoch for small datasets
+        save_strategy="epoch",
+        logging_strategy = "epoch",
+        save_total_limit=1,
         learning_rate=5e-5,
         weight_decay=0.01,
-        warmup_steps=100,
+        warmup_steps=10, # Adjusted for small dataset
         logging_dir="./logs",
-        logging_steps=50,
+        logging_steps=10,
         remove_unused_columns=False,
         dataloader_pin_memory=False,
-        fp16=True,
+        bf16=True,
         report_to="none"
     )
-
-    data_collator = DataCollatorForLanguageModeling(
+    
+    # CORRECTED: Use the CustomDistillationCollator
+    data_collator = CustomDistillationCollator(
         tokenizer=tokenizer,
         mlm=False,
         pad_to_multiple_of=8
