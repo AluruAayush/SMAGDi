@@ -39,7 +39,7 @@ def format_strategyqa(example):
         "5. State your final answer as either \"Yes\" or \"No\"\n"
         "Analysis and Answer:"
     )
-    label = "True" if example["answer"] else "False"
+    label = "yes" if example["answer"] else "no"
     return {"prompt": system_prompt, "label": label}
 
 # Format and keep only the new prompt/label fields
@@ -53,7 +53,7 @@ eval_dataset = train_test["test"]
 
 # 4. Load LLaMA Model + Tokenizer
 hf_token = ENV[‘AUTH_TOKEN’]
-model_name = "meta-llama/Llama-3.1-8B-Instruct" # 3B: meta-llama/Llama-3.2-3B 
+model_name = "meta-llama/Llama-3.2-3B" # 3B: meta-llama/Llama-3.2-3B 
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, use_fast=True)
 tokenizer.pad_token = tokenizer.eos_token
@@ -197,7 +197,7 @@ def compute_metrics(eval_pred):
     return {"exact_match_accuracy": accuracy}
 
 # 10. Trainer Setup (Seq2Seq) 
-trainer = Seq2SeqTrainer(
+trainer = Trainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
@@ -209,5 +209,6 @@ trainer = Seq2SeqTrainer(
 
 # 11. Train & Evaluate
 trainer.train()
+torch.cuda.empty_cache()
 results = trainer.evaluate()
 print("Evaluation Results:", results)
