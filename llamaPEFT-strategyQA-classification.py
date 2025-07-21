@@ -82,6 +82,7 @@ training_args = TrainingArguments(
     output_dir="./llama-strategyqa-lora",
     per_device_train_batch_size=2,
     per_device_eval_batch_size=2,
+    eval_accumulation_steps=1, 
     num_train_epochs=1,
     learning_rate=5e-5,
     fp16=True,
