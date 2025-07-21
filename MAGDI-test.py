@@ -25,7 +25,6 @@ model = AutoModelForCausalLM.from_pretrained(
     cache_dir=CACHE_DIR,
     device_map='auto'
 )
-model.eval()
 
 # ==== Load tokenizer ====
 tokenizer = AutoTokenizer.from_pretrained(
