@@ -1,4 +1,4 @@
-# LLaMA + PEFT - StrategyQA Classification (Final Version) 
+# LLaMA + PEFT - StrategyQA Classification  
 
 # 1. Install necessary packages
 !pip install -U peft bitsandbytes scikit-learn accelerate
