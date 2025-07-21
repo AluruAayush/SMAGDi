@@ -1,4 +1,4 @@
-# Llama-PEFT with StrategyQA (Generation - 63.5% 3B, 72.1% 8B)
+# Llama-PEFT Baseline on StrategyQA using CoT - Final Version
 
 # 1. Install necessary packages
 !pip install -U peft bitsandbytes scikit-learn accelerate
@@ -21,10 +21,26 @@ import numpy as np
 # 3. Load & Format StrategyQA Dataset
 dataset = load_dataset("wics/strategy-qa")["test"]
 
-def format_strategyqa(example):
+'''def format_strategyqa(example):
     prompt = f"Q: {example['question']}\nA:"
     label = "yes" if example["answer"] else "no"
-    return {"prompt": prompt, "label": label}
+    return {"prompt": prompt, "label": label}'''
+
+def format_strategyqa(example):
+    # Using our prompting technique with CoT 
+    system_prompt = (
+        "You are an expert reasoning assistant. Your task is to answer Yes/No questions with careful analysis.\n"
+        "Question: " + example["question"] + "\n"
+        "Instructions:\n"
+        "1. Let's think step by step about this question\n"
+        "2. Break down the key components and requirements\n"
+        "3. Consider what knowledge is needed to answer this\n"
+        "4. Apply logical reasoning to reach a conclusion\n"
+        "5. State your final answer as either \"Yes\" or \"No\"\n"
+        "Analysis and Answer:"
+    )
+    label = "True" if example["answer"] else "False"
+    return {"prompt": system_prompt, "label": label}
 
 # Format and keep only the new prompt/label fields
 dataset = dataset.map(format_strategyqa)
@@ -35,9 +51,9 @@ train_test = dataset.train_test_split(test_size=0.2, seed=42)
 train_dataset = train_test["train"]
 eval_dataset = train_test["test"]
 
-# 4. Load LLaMA 3.2 3B + Tokenizer
+# 4. Load LLaMA Model + Tokenizer
 hf_token = ENV[‘AUTH_TOKEN’]
-model_name = "meta-llama/Llama-3.1-8B-Instruct" # for 3B: meta-llama/Llama-3.2-3B
+model_name = "meta-llama/Llama-3.1-8B-Instruct" # 3B: meta-llama/Llama-3.2-3B 
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, use_fast=True)
 tokenizer.pad_token = tokenizer.eos_token
@@ -180,7 +196,7 @@ def compute_metrics(eval_pred):
 
     return {"exact_match_accuracy": accuracy}
 
-# 10. Trainer Setup
+# 10. Trainer Setup (Seq2Seq) 
 trainer = Seq2SeqTrainer(
     model=model,
     args=training_args,
