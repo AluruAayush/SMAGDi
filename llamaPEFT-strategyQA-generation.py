@@ -1,15 +1,11 @@
-# Llama-PEFT with StrategyQA 
+# Llama-PEFT with StrategyQA (Generation - 63.5% 3B, 72.1% 8B)
 
-# ================================
 # 1. Install necessary packages
-# ================================
 !pip install -U peft bitsandbytes scikit-learn accelerate
 !pip install datasets==3.6
 !pip install transformers==4.6.1 
 
-# ================================
 # 2. Imports
-# ================================
 import torch
 import datasets 
 from datasets import load_dataset
@@ -22,9 +18,7 @@ from peft import get_peft_model, LoraConfig, TaskType
 from sklearn.metrics import accuracy_score
 import numpy as np
 
-# ================================
 # 3. Load & Format StrategyQA Dataset
-# ================================
 dataset = load_dataset("wics/strategy-qa")["test"]
 
 def format_strategyqa(example):
@@ -41,9 +35,7 @@ train_test = dataset.train_test_split(test_size=0.2, seed=42)
 train_dataset = train_test["train"]
 eval_dataset = train_test["test"]
 
-# ================================
 # 4. Load LLaMA 3.2 3B + Tokenizer
-# ================================
 hf_token = ENV[‘AUTH_TOKEN’]
 model_name = "meta-llama/Llama-3.1-8B-Instruct" # for 3B: meta-llama/Llama-3.2-3B
 
@@ -58,9 +50,7 @@ model = AutoModelForCausalLM.from_pretrained(
     token=hf_token
 )
 
-# ================================
 # 5. Apply LoRA
-# ================================
 lora_config = LoraConfig(
     r=64,
     lora_alpha=16,
@@ -72,6 +62,7 @@ lora_config = LoraConfig(
 model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
+# Version Checks 
 import transformers
 import datasets 
 import accelerate
@@ -86,9 +77,7 @@ print("bitsandbytes:", bitsandbytes.__version__)
 print("torch:", torch.__version__)
 print("sklearn:", sklearn.__version__)
 
-# ================================
 # 6. Tokenize prompt + label together for causal LM
-# ================================
 def tokenize(example):
     # tokenize full text: prompt + answer
     full_text = example["prompt"] + " " + example["label"]
@@ -108,15 +97,10 @@ def tokenize(example):
     tokenized["labels"] = labels
     return tokenized
 
-'''train_dataset = train_dataset.map(tokenize, remove_columns=train_dataset.column_names)
-eval_dataset = eval_dataset.map(tokenize, remove_columns=eval_dataset.column_names)'''
-
 train_dataset = train_dataset.map(tokenize, remove_columns=["prompt", "label"])
 eval_dataset = eval_dataset.map(tokenize, remove_columns=["prompt", "label"])
 
-# ================================
 # 7. TrainingArguments
-# ================================
 training_args = Seq2SeqTrainingArguments(
     output_dir="./llama-strategyqa-lora",
     per_device_train_batch_size=2,
@@ -133,9 +117,7 @@ training_args = Seq2SeqTrainingArguments(
     generation_max_length=10              # <-- Short since answers are yes/no
 )
 
-# ================================
 # 8. Data Collator for Seq2Seq
-# ================================
 data_collator = DataCollatorForSeq2Seq(
     tokenizer=tokenizer,
     model=model,
@@ -144,9 +126,7 @@ data_collator = DataCollatorForSeq2Seq(
     return_tensors="pt"
 )
 
-# ================================
 # 9. Exact Match Accuracy Metric
-# ================================
 def compute_metrics(eval_pred):
     predictions, labels = eval_pred
 
@@ -200,10 +180,8 @@ def compute_metrics(eval_pred):
 
     return {"exact_match_accuracy": accuracy}
 
-# ================================
 # 10. Trainer Setup
-# ================================
-trainer = Trainer(
+trainer = Seq2SeqTrainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
@@ -213,9 +191,7 @@ trainer = Trainer(
     compute_metrics=compute_metrics
 )
 
-# ================================
 # 11. Train & Evaluate
-# ================================
 trainer.train()
 results = trainer.evaluate()
 print("Evaluation Results:", results)
