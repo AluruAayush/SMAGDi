@@ -8,7 +8,7 @@
 # 2. Imports
 import torch
 import datasets 
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from transformers import (
     AutoTokenizer, AutoModelForCausalLM,
     Seq2SeqTrainingArguments, Trainer,
@@ -18,47 +18,51 @@ from peft import get_peft_model, LoraConfig, TaskType
 from sklearn.metrics import accuracy_score
 import numpy as np
 
+print("imports complete") 
+
 # 3. Load & Format StrategyQA Dataset
 from tqdm import tqdm  # for progress bar
 def create_dataset(): 
-  # List of MMLU subject keys (as per your message)
-  subject_keys = [
-      'abstract_algebra', 'anatomy', 'astronomy', 'business_ethics',
-      'clinical_knowledge', 'college_biology', 'college_chemistry', 'college_computer_science',
-      'college_mathematics', 'college_medicine', 'college_physics', 'computer_security',
-      'conceptual_physics', 'econometrics', 'electrical_engineering', 'elementary_mathematics',
-      'formal_logic', 'global_facts', 'high_school_biology', 'high_school_chemistry',
-      'high_school_computer_science', 'high_school_european_history', 'high_school_geography',
-      'high_school_government_and_politics', 'high_school_macroeconomics', 'high_school_mathematics',
-      'high_school_microeconomics', 'high_school_physics', 'high_school_psychology',
-      'high_school_statistics', 'high_school_us_history', 'high_school_world_history',
-      'human_aging', 'human_sexuality', 'international_law', 'jurisprudence', 'logical_fallacies',
-      'machine_learning', 'management', 'marketing', 'medical_genetics', 'miscellaneous',
-      'moral_disputes', 'moral_scenarios', 'nutrition', 'philosophy', 'prehistory',
-      'professional_accounting', 'professional_law', 'professional_medicine',
-      'professional_psychology', 'public_relations', 'security_studies', 'sociology',
-      'us_foreign_policy', 'virology', 'world_religions'
-  ]
-  # Collect all 20% samples
-  synthetic_dataset = []
-  for subject in tqdm(subject_keys, desc="Loading & sampling subjects"):
-      try:
-          # Load the 'test' split of the subject
-          dataset = load_dataset("cais/mmlu", subject)
-          # Compute 20% of the dataset (ensure at least 1 sample)
-          sample = dataset["test"].train_test_split(test_size = 0.2, seed=42)
-          # Shuffle and select 20% sample
-          sampled = sample["test"]
-          print(len(sampled))
-          synthetic_dataset.append(sampled)
-      except Exception as e:
-          print(f"Failed to load subject '{subject}': {e}")
-  else:
-      print(":x: No subjects loaded successfully.")
-  # Optional: print example
-  print(synthetic_dataset[0])
-  
-  return synthetic_dataset 
+    # List of MMLU subject keys
+    subject_keys = [
+        'abstract_algebra', 'anatomy', 'astronomy', 'business_ethics',
+        'clinical_knowledge', 'college_biology', 'college_chemistry', 'college_computer_science',
+        'college_mathematics', 'college_medicine', 'college_physics', 'computer_security',
+        'conceptual_physics', 'econometrics', 'electrical_engineering', 'elementary_mathematics',
+        'formal_logic', 'global_facts', 'high_school_biology', 'high_school_chemistry',
+        'high_school_computer_science', 'high_school_european_history', 'high_school_geography',
+        'high_school_government_and_politics', 'high_school_macroeconomics', 'high_school_mathematics',
+        'high_school_microeconomics', 'high_school_physics', 'high_school_psychology',
+        'high_school_statistics', 'high_school_us_history', 'high_school_world_history',
+        'human_aging', 'human_sexuality', 'international_law', 'jurisprudence', 'logical_fallacies',
+        'machine_learning', 'management', 'marketing', 'medical_genetics', 'miscellaneous',
+        'moral_disputes', 'moral_scenarios', 'nutrition', 'philosophy', 'prehistory',
+        'professional_accounting', 'professional_law', 'professional_medicine',
+        'professional_psychology', 'public_relations', 'security_studies', 'sociology',
+        'us_foreign_policy', 'virology', 'world_religions'
+    ]
+    
+    # Collect all 20% samples
+    sampled_datasets = []
+    for subject in tqdm(subject_keys, desc="Loading & sampling subjects"):
+        try:
+            # Load the 'test' split of the subject
+            dataset = load_dataset("cais/mmlu", subject, split="test")
+            # Take a 20% sample
+            sampled = dataset.train_test_split(test_size=0.2, seed=42)["test"]
+            sampled_datasets.append(sampled)
+        except Exception as e:
+            print(f"Failed to load subject '{subject}': {e}")
+    
+    # Concatenate into a single dataset
+    if sampled_datasets:
+        synthetic_dataset = concatenate_datasets(sampled_datasets)
+        print(f"\n✅ Successfully created synthetic dataset with {len(synthetic_dataset)} total examples.")
+        print(synthetic_dataset[0])  # Optional: Show first sample
+    else:
+        print("❌ No subjects loaded successfully.")
+        
+    return synthetic_dataset 
 
 dataset = create_dataset()
 
@@ -79,23 +83,23 @@ def format_strategyqa(example):
     label = ""
     system_prompt = (
         "You are an expert reasoning assistant. Your task is to answer multiple-choice questions with careful analysis.\n"
-        "Question: " + example["question"] + "\n"
+        "Question: " + example["prompt"] + "\n"
         "Instructions:\n"
         "1. Let's think step by step about this question\n"
         "2. Break down the key components and requirements\n"
         "3. Consider what knowledge is needed to answer this\n"
         "4. Apply logical reasoning to reach a conclusion\n"
-        "5. State your final answer as either \"a\" or \"b\" or \"c\" or \"d\"\n"
+        "5. State your final answer as one of the following numbers corresponding to the list position of the correct choice out of the 4 given: \"0\" or \"1\" or \"2\" or \"3\"\n"
         "Analysis and Answer:"
     )
-    if example["answer"] == "a":
-        label = "a" 
-    elif example["answer"] == "b":
-        label = "b" 
-    elif example["answer"] == "c":
-        label = "c" 
-    elif example["answer"] == "d":
-        label = "d" 
+    if example["label"] == "0":
+        label = "0" 
+    elif example["label"] == "1":
+        label = "1" 
+    elif example["label"] == "2":
+        label = "2" 
+    elif example["label"] == "3":
+        label = "3" 
     return {"prompt": system_prompt, "label": label}
 
 # Format and keep only the new prompt/label fields
@@ -186,7 +190,8 @@ training_args = Seq2SeqTrainingArguments(
     #evaluation_strategy="epoch",
     save_strategy="epoch",
     predict_with_generate=True,           # <-- Enable generation
-    generation_max_length=10              # <-- Short since answers are yes/no
+    generation_max_length=10,              # <-- Short since answers are yes/no
+    eval_accumulation_steps=100
 )
 
 # 8. Data Collator for Seq2Seq
