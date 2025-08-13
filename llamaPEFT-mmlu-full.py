@@ -1,4 +1,4 @@
-# Llama-PEFT Baseline on MMLU using CoT - ROUGH Version
+# Llama-PEFT Baseline on MMLU using CoT - ROUGH Version (GENERATION)
 
 # 1. Install necessary packages
 !pip install -U peft bitsandbytes scikit-learn accelerate
