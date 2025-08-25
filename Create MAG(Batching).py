@@ -841,21 +841,17 @@ def main():
     # Load dataset
     full_train = load_dataset("wics/strategy-qa", split="test")
     subsplits = full_train.train_test_split(test_size=.2, seed=42)
-    mag_creation_data = subsplits["test"]
+    data = subsplits.train_test_split(test_size=.1, seed=42)
+    agent_data = data["test"]
+    mag_creation_data = subsplits["train"]
     
-    # Set pre-trained agent weights (from your previous training)
-    for agent in agents:
-        if agent["role"] == "Scientist":
-            agent["weight"] = 0.1903
-        elif agent["role"] == "Lawyer":
-            agent["weight"] = 0.1957
-        elif agent["role"] == "Historian":
-            agent["weight"] = 0.2208
-        elif agent["role"] == "Mathematician":
-            agent["weight"] = 0.1957
-        else:
-            agent["weight"] = 0.1975
-    
+    training_examples = [
+        {"question": item["question"],
+         "gold_answer": item["answer"],
+         "options": item["True", "False"]}
+        for item in agent_data
+    ]
+    agents = train_agent_weights(agents, training_examples)
     # Prepare training data
     training_data = [
         {"question": item["question"],
