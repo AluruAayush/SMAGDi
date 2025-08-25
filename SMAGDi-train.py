@@ -326,7 +326,7 @@ def main():
     # Training configuration
     NUM_EPOCHS = 50
     BATCH_SIZE = 1
-    LEARNING_RATE = 1e-5
+    LEARNING_RATE = 5e-5
     
     # OpenAI API Key    
     set_seed(SEED)
