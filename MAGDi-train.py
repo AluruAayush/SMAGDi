@@ -6,7 +6,7 @@ from torch_geometric.data import Batch
 from transformers import AutoTokenizer, TrainingArguments
 from peft import LoraConfig, get_peft_model
 from accelerate import dispatch_model, infer_auto_device_map
-from model import MAGDi, MAGDiTrainer  # Ensure your MAGDi model and trainer are accessible
+from MAGDi-model import MAGDi, MAGDiTrainer  # Ensure your MAGDi model and trainer are accessible
 
 # 1. Load Dataset
 with open("mag_dataset.json", "r") as f:
