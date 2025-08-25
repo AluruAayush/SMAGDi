@@ -196,6 +196,20 @@ def prepare_training_examples(dataset, tokenizer, max_length=512):
             "completion_input_ids": comp_tok.input_ids.squeeze(0),
             "completion_attention_mask": comp_tok.attention_mask.squeeze(0)
         })
+        solver_prompt = (
+           "Answer the decompositions similar to the agent's responses"
+        )
+        solver_completion = (
+            "Answer thoroughly"
+        )
+        prompt_tok = tokenizer(solver_prompt, max_length=max_length, truncation=True, return_tensors="pt")
+        comp_tok = tokenizer(solver_completion, max_length=max_length, truncation=True, return_tensors="pt")
+        item_decomposer.append({
+            "prompt_input_ids": prompt_tok.input_ids.squeeze(0),
+            "prompt_attention_mask": prompt_tok.attention_mask.squeeze(0),
+            "completion_input_ids": comp_tok.input_ids.squeeze(0),
+            "completion_attention_mask": comp_tok.attention_mask.squeeze(0)
+        })
 
         # --- Build reasoning chains and process solver examples ---
         def build_chains(node_id, current_chain=[]):
