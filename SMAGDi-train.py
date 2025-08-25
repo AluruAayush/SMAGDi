@@ -180,7 +180,7 @@ def prepare_training_examples(dataset, tokenizer, max_length=512):
         # --- Decomposer: Always generate a synthetic decomposition ---
         decomposer_prompt = (
             f"Decompose the following question into a sequence of simpler sub-questions that, when answered, "
-            f"would help solve the main question:\n\nQuestion: {question}"
+            f"would help solve the main question:\n\nQuestion: {question}, based on the agent's responses"
         )
         decomposer_completion = (
             "1. What are the key facts or entities in the question?\n"
