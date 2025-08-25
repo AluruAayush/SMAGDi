@@ -303,7 +303,7 @@ def main():
 
     training_args = TrainingArguments(
         output_dir="./multi_agent_distilled_student",
-        num_train_epochs=3,
+        num_train_epochs=7,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=2,
