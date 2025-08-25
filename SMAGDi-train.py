@@ -324,7 +324,6 @@ def main():
     DELTA = 0.5  # Weight for decomposer-solver alignment loss
     
     # Training configuration
-    NUM_EPOCHS = 50
     BATCH_SIZE = 1
     LEARNING_RATE = 5e-5
     
@@ -399,7 +398,7 @@ def main():
     from transformers import TrainingArguments
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
-        num_train_epochs=8,
+        num_train_epochs=7,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=32,
         learning_rate=LEARNING_RATE,
