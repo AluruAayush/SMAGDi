@@ -1,6 +1,6 @@
 Step 1:
 
-Run the SMAGDi Create MAG for the needed dataset(train split)
+Run the Create MAG for the needed dataset(train split)
 
 Step 2:
 
