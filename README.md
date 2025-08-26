@@ -16,5 +16,9 @@ Run SKD train and test for the given dataset
 
 Step 5:
 
+Run the LoRA fine-tuning code for the given dataset
+
+Step 6:
+
 Repeat for all datasets needed(Code provided is for StrategyQA, modify prompting for different datasets based on option choices.)
 
