@@ -16,5 +16,5 @@ Run SKD train and test for the given dataset
 
 Step 5:
 
-Repeat for all datasets needed(Code provided is for StrategyQA, change prompting for datasets options)
+Repeat for all datasets needed(Code provided is for StrategyQA, modify prompting for different datasets based on option choices.)
 
